@@ -2,7 +2,7 @@
 setlocal
 
 echo ==================================================
-echo   WSL Mount Manager - Build (C++)
+echo   wslpm - Build (C++)
 echo ==================================================
 echo.
 
@@ -35,13 +35,13 @@ if %errorlevel% neq 0 (
 )
 
 :: Main compilation and linking (single line for reliability)
-cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /DUNICODE /D_UNICODE /I src /Fo:build\ src\main.cpp src\app.cpp src\wsl_bridge.cpp src\operations.cpp build\app.res /Fe:build\WSLMountManager.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib dwmapi.lib comctl32.lib uxtheme.lib ole32.lib oleaut32.lib crypt32.lib shlwapi.lib comdlg32.lib advapi32.lib uuid.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /DUNICODE /D_UNICODE /I src /Fo:build\ src\main.cpp src\app.cpp src\wsl_bridge.cpp src\operations.cpp build\app.res /Fe:build\wslpm.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib dwmapi.lib comctl32.lib uxtheme.lib ole32.lib oleaut32.lib crypt32.lib shlwapi.lib comdlg32.lib advapi32.lib uuid.lib
 
 if %errorlevel%==0 (
     echo.
     echo ==================================================
     echo   BUILD SUCCESSFUL!
-    echo   Executable: build\WSLMountManager.exe
+    echo   Executable: build\wslpm.exe
     echo ==================================================
 ) else (
     echo.

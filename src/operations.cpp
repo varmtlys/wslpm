@@ -31,8 +31,8 @@ std::wstring MountedVolume::displayDevice() const {
 std::wstring Operations::shortcutDir() {
     wchar_t path[MAX_PATH];
     SHGetFolderPathW(nullptr, CSIDL_PROFILE, nullptr, 0, path);
-    std::wstring dir = std::wstring(path) + L"\\.wsl_mount_manager\\shortcuts";
-    CreateDirectoryW((std::wstring(path) + L"\\.wsl_mount_manager").c_str(), nullptr);
+    std::wstring dir = std::wstring(path) + L"\\.wslpm\\shortcuts";
+    CreateDirectoryW((std::wstring(path) + L"\\.wslpm").c_str(), nullptr);
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }

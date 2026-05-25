@@ -1,4 +1,6 @@
-# WSL Mount Manager (C++ Native)
+# wslpm — WSL Partition Manager (C++ Native)
+
+> Originally conceived to solve a specific problem: mounting encrypted Linux partitions (LUKS, LVM) directly in Windows via WSL2 — without dual-booting or running a full VM.
 
 A native Win32 utility for mounting Linux volumes (LVM, LUKS, ext4, xfs, btrfs, NTFS, VFAT) via WSL2 on Windows 11.
 
@@ -28,7 +30,7 @@ build.bat
 cmake -B build && cmake --build build
 ```
 
-Output: `build/WSLMountManager.exe`
+Output: `build\wslpm.exe`
 
 ## How to Use
 

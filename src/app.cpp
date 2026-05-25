@@ -5,7 +5,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 
-static const wchar_t* CLASS_NAME = L"WSLMountManagerWindow";
+static const wchar_t* CLASS_NAME = L"wslpmWindow";
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ bool AppWindow::Create(HINSTANCE hInst) {
     m_hInst = hInst;
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     m_hwnd = CreateWindowExW(0, CLASS_NAME,
-        L"\U0001F427 WSL Mount Manager",
+        L"WSL Partition Manager",
         WS_OVERLAPPEDWINDOW,
         (sx - Theme::WIN_W) / 2, (sy - Theme::WIN_H) / 2,
         Theme::WIN_W, Theme::WIN_H,

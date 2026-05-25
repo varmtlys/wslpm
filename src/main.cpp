@@ -1,5 +1,5 @@
 /*
- * WSL Mount Manager — Native C++ Win32 Application
+ * wslpm — WSL Partition Manager, native C++ Win32 Application
  * Entry point with Common Controls initialization.
  */
 #include "app.h"
