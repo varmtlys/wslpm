@@ -1,0 +1,16 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "..\\src\\resource.h"
+
+1 RT_MANIFEST "app.manifest"
+
+IDD_DIALOG_PASSWORD DIALOGEX 0, 0, 200, 70
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Enter Password"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "Enter password:", IDC_STATIC_TEXT, 7, 7, 186, 12
+    EDITTEXT        IDC_EDIT_PWD_INPUT, 7, 20, 186, 14, ES_PASSWORD | ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "OK", IDOK, 89, 49, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 143, 49, 50, 14
+END
