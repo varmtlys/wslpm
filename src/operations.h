@@ -40,6 +40,13 @@ struct MountedVolume {
     std::wstring displayDevice() const;
 };
 
+struct WSLImage {
+    std::wstring name;      // distribution name
+    std::wstring vhdxPath;  // full path to ext4.vhdx
+    uint64_t sizeBytes = 0;
+    std::wstring sizeDisplay() const;
+};
+
 // ── Operations ───────────────────────────────────────────
 
 class Operations {
@@ -73,6 +80,11 @@ public:
     // Unmount
     bool unmountByMountPoint(const std::wstring& mountPoint, std::wstring& msg);
     bool unmountAll(std::wstring& msg);
+
+    // Distro image compaction (shuts down ALL of WSL)
+    std::vector<WSLImage> getWSLImages();
+    bool compactDistro(const std::wstring& distro, const std::wstring& vhdxPath,
+                       bool zeroFree, std::wstring& msg);
 
     // Explorer integration
     bool createShortcut(const std::wstring& distro, const std::wstring& mountPoint,

@@ -47,6 +47,14 @@
 // Toolbar
 #define IDC_BTN_REFRESH          1050
 #define IDC_BTN_UNMOUNT_ALL      1051
+#define IDC_BTN_COMPACT          1052
+#define IDC_PROGRESS             1053
+
+// Compact dialog
+#define IDD_DIALOG_COMPACT       2100
+#define IDC_LIST_IMAGES          2101
+#define IDC_CHECK_ZEROFREE       2102
+#define IDC_STATIC_COMPACT_INFO  2103
 
 // Status
 #define IDC_STATUSBAR            1060
@@ -58,3 +66,5 @@
 #define WM_APP_UNMOUNT_DONE      (WM_APP + 4)
 #define WM_APP_ENV_CHECKED       (WM_APP + 5)
 #define WM_APP_COMMAND_LOG       (WM_APP + 6)
+#define WM_APP_COMPACT_DONE      (WM_APP + 7)
+#define WM_APP_COMPACT_PROGRESS  (WM_APP + 8)

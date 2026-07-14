@@ -171,6 +171,32 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         delete data;
         return 0;
     }
+    case WM_APP_COMPACT_PROGRESS: {
+        if (m_terminating) return 0;
+        if (m_progressMarquee) {
+            // First percentage arrived — switch marquee to a real progress bar
+            SendMessageW(m_progress, PBM_SETMARQUEE, FALSE, 0);
+            SetWindowLongPtrW(m_progress, GWL_STYLE,
+                GetWindowLongPtrW(m_progress, GWL_STYLE) & ~PBS_MARQUEE);
+            m_progressMarquee = false;
+        }
+        SendMessageW(m_progress, PBM_SETPOS, wp, 0);
+        return 0;
+    }
+    case WM_APP_COMPACT_DONE: {
+        if (m_terminating) return 0;
+        auto* data = (std::pair<bool, std::wstring>*)lp;
+        setStatus(data->second);
+        ShowWindow(m_progress, SW_HIDE);
+        SendMessageW(m_progress, PBM_SETPOS, 0, 0);
+        EnableWindow(m_btnCompact, TRUE);
+        SetWindowTextW(m_btnCompact, L"\U0001F5DC Compact VHDX");
+        MessageBoxW(m_hwnd, data->second.c_str(), L"Compact VHDX",
+                    data->first ? MB_ICONINFORMATION : MB_ICONERROR);
+        updateMountedList(); // wsl --shutdown killed any mounts
+        delete data;
+        return 0;
+    }
     case WM_APP_COMMAND_LOG: {
         std::wstring* p = (std::wstring*)lp;
         appendLog(*p);
@@ -232,6 +258,13 @@ void AppWindow::onCreate() {
     int tx = SB + M;
     m_btnRefresh = MakeButton(m_hwnd, hi, L"\U0001F504 Refresh", tx, 6, 110, 30, m_font, IDC_BTN_REFRESH, true);
     m_btnUnmountAll = MakeButton(m_hwnd, hi, L"\u23CF Unmount All", tx+116, 6, 170, 30, m_font, IDC_BTN_UNMOUNT_ALL, true);
+    m_btnCompact = MakeButton(m_hwnd, hi, L"\U0001F5DC Compact VHDX", tx+292, 6, 170, 30, m_font, IDC_BTN_COMPACT, true);
+
+    // Progress bar for long operations (hidden until needed)
+    m_progress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+        WS_CHILD | PBS_MARQUEE | PBS_SMOOTH,
+        tx + 468, 10, 220, 22, m_hwnd, (HMENU)(UINT_PTR)IDC_PROGRESS, hi, nullptr);
+    SendMessageW(m_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
 
     // ── Sidebar ──
     MakeLabel(m_hwnd, hi, L"\U0001F4BF  Physical Disks", M, TH + M, SB - 2*M, 20, m_fontBold);
@@ -523,6 +556,7 @@ void AppWindow::onCommand(WORD id, WORD code, HWND ctl) {
     case IDC_BTN_MOUNT:       doMount(); break;
     case IDC_BTN_REFRESH:     refreshDisks(); break;
     case IDC_BTN_UNMOUNT_ALL: unmountAll(); break;
+    case IDC_BTN_COMPACT:     doCompact(); break;
     case IDC_BTN_UNMOUNT_SEL: {
         int sel = ListView_GetNextItem(m_lvMounted, -1, LVNI_SELECTED);
         if (sel >= 0) doUnmount(sel);
@@ -815,6 +849,107 @@ void AppWindow::doOpen(int idx) {
     m_ops.openInExplorer(v.distro.empty() ? L"Ubuntu" : v.distro, v.mountPoint);
 }
 
+struct CompactDlgParam {
+    std::vector<WSLImage>* images;
+    int selected = -1;
+    bool zeroFree = false;
+};
+
+INT_PTR CALLBACK AppWindow::CompactDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* p = (CompactDlgParam*)GetWindowLongPtrW(hDlg, DWLP_USER);
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(hDlg, DWLP_USER, (LONG_PTR)lp);
+        p = (CompactDlgParam*)lp;
+        HWND lb = GetDlgItem(hDlg, IDC_LIST_IMAGES);
+        for (auto& img : *p->images) {
+            std::wstring s = img.name + L" — " + img.sizeDisplay() + L"  (" + img.vhdxPath + L")";
+            SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)s.c_str());
+        }
+        SendMessageW(lb, LB_SETCURSEL, 0, 0);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        WORD id = LOWORD(wp);
+        if (id == IDOK || (id == IDC_LIST_IMAGES && HIWORD(wp) == LBN_DBLCLK)) {
+            int sel = (int)SendMessageW(GetDlgItem(hDlg, IDC_LIST_IMAGES), LB_GETCURSEL, 0, 0);
+            if (sel < 0) return TRUE; // nothing selected
+            p->selected = sel;
+            p->zeroFree = IsDlgButtonChecked(hDlg, IDC_CHECK_ZEROFREE) == BST_CHECKED;
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        }
+        if (id == IDCANCEL) { EndDialog(hDlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    }
+    return FALSE;
+}
+
+void AppWindow::doCompact() {
+    {
+        std::lock_guard<std::mutex> lk(m_ops.mtx());
+        if (!m_ops.mounted().empty()) {
+            MessageBoxW(m_hwnd, L"Unmount all volumes first — compaction shuts down WSL entirely.",
+                        L"Compact VHDX", MB_ICONWARNING);
+            return;
+        }
+    }
+
+    // Enumerate all registered WSL images and let the user pick one
+    setStatus(L"Scanning WSL images...");
+    auto images = m_ops.getWSLImages();
+    if (images.empty()) {
+        setStatus(L"No WSL images found");
+        MessageBoxW(m_hwnd, L"No WSL distribution images (ext4.vhdx) found in the registry.",
+                    L"Compact VHDX", MB_ICONWARNING);
+        return;
+    }
+
+    CompactDlgParam param{ &images };
+    if (DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_DIALOG_COMPACT),
+                        m_hwnd, CompactDlgProc, (LPARAM)&param) != IDOK || param.selected < 0) {
+        setStatus(L"Compaction cancelled");
+        return;
+    }
+    WSLImage img = images[param.selected];
+    bool zeroFree = param.zeroFree;
+
+    // Zero-fill runs as root inside the distro
+    if (zeroFree && m_ops.bridge.wslPassword().empty()) {
+        std::wstring sp = PromptPassword(m_hwnd, L"Sudo",
+            L"Zeroing free space requires sudo.\r\nEnter your WSL user password:");
+        if (!sp.empty()) m_ops.bridge.setWslPassword(sp);
+        else zeroFree = false;
+    }
+
+    EnableWindow(m_btnCompact, FALSE);
+    SetWindowTextW(m_btnCompact, L"⏳ Compacting...");
+    setStatus(L"Compacting '" + img.name + L"' (" + img.sizeDisplay() + L")...");
+
+    // Progress: marquee until diskpart starts reporting percentages
+    m_progressMarquee = true;
+    SetWindowLongPtrW(m_progress, GWL_STYLE,
+        GetWindowLongPtrW(m_progress, GWL_STYLE) | PBS_MARQUEE);
+    SendMessageW(m_progress, PBM_SETMARQUEE, TRUE, 0);
+    ShowWindow(m_progress, SW_SHOW);
+
+    HWND hwnd = m_hwnd;
+    m_ops.bridge.setProgressCallback([hwnd](int p) {
+        PostMessageW(hwnd, WM_APP_COMPACT_PROGRESS, (WPARAM)p, 0);
+    });
+
+    m_pendingThreads++;
+    std::thread([=]() {
+        std::wstring msg;
+        bool ok = m_ops.compactDistro(img.name, img.vhdxPath, zeroFree, msg);
+        m_ops.bridge.setProgressCallback(nullptr);
+        if (!m_terminating)
+            PostMessageW(m_hwnd, WM_APP_COMPACT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(ok, msg));
+        m_pendingThreads--;
+    }).detach();
+}
+
 void AppWindow::unmountAll() {
     {
         std::lock_guard<std::mutex> lk(m_ops.mtx());
@@ -888,6 +1023,21 @@ INT_PTR CALLBACK AppWindow::PasswordDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPAR
 
 void AppWindow::onDestroy() {
     if (m_terminating) return; // re-entrant WM_CLOSE while pumping messages below
+
+    // A background operation (mount/unmount/compact) is running — confirm twice
+    if (m_pendingThreads > 0) {
+        if (MessageBoxW(m_hwnd,
+                L"A background operation is still running (mount, unmount or VHDX compaction).\n\n"
+                L"Closing now will wait for it to finish. Close anyway?",
+                L"Operation in progress", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+            return;
+        if (MessageBoxW(m_hwnd,
+                L"Are you sure? Interrupting a compaction or mount operation\n"
+                L"may leave WSL or the disk image in an inconsistent state.",
+                L"Confirm close", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+            return;
+    }
+
     m_terminating = true;
     // Wait for background threads to finish
     while (m_pendingThreads > 0) {

@@ -36,17 +36,25 @@ static std::wstring DecodeUTF16LE(const std::string& bytes) {
     return r;
 }
 
-// Decode raw bytes as UTF-8 (used for PowerShell and WSL bash commands)
-static std::wstring DecodeUTF8(const std::string& bytes) {
+// Decode raw bytes with the given codepage (UTF-8 or console OEM)
+static std::wstring DecodeMB(const std::string& bytes, UINT codepage) {
     if (bytes.empty()) return L"";
-    int n = MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), (int)bytes.size(), nullptr, 0);
+    int n = MultiByteToWideChar(codepage, 0, bytes.c_str(), (int)bytes.size(), nullptr, 0);
     if (n > 0) {
         std::wstring w(n, 0);
-        MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), (int)bytes.size(), w.data(), n);
+        MultiByteToWideChar(codepage, 0, bytes.c_str(), (int)bytes.size(), w.data(), n);
         w.erase(std::remove(w.begin(), w.end(), L'\0'), w.end());
         return w;
     }
     return L"";
+}
+
+static std::wstring DecodeBytes(const std::string& bytes, OutEnc enc) {
+    switch (enc) {
+    case OutEnc::UTF16LE: return DecodeUTF16LE(bytes);
+    case OutEnc::OEM:     return DecodeMB(bytes, CP_OEMCP);
+    default:              return DecodeMB(bytes, CP_UTF8);
+    }
 }
 
 static std::wstring Base64Encode(const void* data, size_t size) {
@@ -67,7 +75,8 @@ static std::wstring Base64Encode(const void* data, size_t size) {
 CommandResult WSLBridge::RunProcess(const std::wstring& commandLine,
                                     int timeoutMs,
                                     const std::string& stdinData,
-                                    bool utf16leOutput) {
+                                    OutEnc enc,
+                                    bool streamLog) {
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
 
     HANDLE hOutR = nullptr, hOutW = nullptr;
@@ -119,13 +128,55 @@ CommandResult WSLBridge::RunProcess(const std::wstring& commandLine,
     }
     if (hInW) CloseHandle(hInW);
 
-    // Read stdout in thread
+    // Read stdout in thread; optionally stream complete lines to the log as they arrive
+    // (line streaming only for byte encodings — UTF-16LE chunks may split a code unit)
+    bool stream = streamLog && enc != OutEnc::UTF16LE;
     std::string rawOutput;
     std::thread reader([&]() {
         char buf[4096];
         DWORD bytesRead;
-        while (ReadFile(hOutR, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0)
+        size_t lineStart = 0;
+        std::wstring lastLine; // suppress repeated progress lines
+        while (ReadFile(hOutR, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
             rawOutput.append(buf, bytesRead);
+            if (!stream) continue;
+            size_t nl;
+            while ((nl = rawOutput.find_first_of("\r\n", lineStart)) != std::string::npos) {
+                std::string lineA = rawOutput.substr(lineStart, nl - lineStart);
+                lineStart = nl + 1;
+                if (!lineA.empty()) {
+                    std::wstring lineW = DecodeBytes(lineA, enc);
+                    if (!lineW.empty() && lineW != lastLine) {
+                        log(lineW);
+                        lastLine = lineW;
+                        // diskpart progress lines look like "...:  NN" in any locale —
+                        // take the number only when nothing but digits follows the last ':'
+                        if (m_progressCb) {
+                            size_t colon = lineW.rfind(L':');
+                            if (colon != std::wstring::npos) {
+                                int val = 0;
+                                bool digits = false, clean = true;
+                                for (size_t i = colon + 1; i < lineW.size(); i++) {
+                                    wchar_t c = lineW[i];
+                                    if (c >= L'0' && c <= L'9') { val = val * 10 + (c - L'0'); digits = true; }
+                                    else if (c != L' ' && c != L'\t') { clean = false; break; }
+                                }
+                                if (digits && clean && val <= 100) m_progressCb(val);
+                            } else if (lineW.find(L"percent") != std::wstring::npos) {
+                                // English diskpart: "  NN percent completed"
+                                int val = 0; bool digits = false;
+                                for (wchar_t c : lineW) {
+                                    if (c >= L'0' && c <= L'9') { val = val * 10 + (c - L'0'); digits = true; }
+                                    else if (digits) break;
+                                    else if (c != L' ' && c != L'\t') break;
+                                }
+                                if (digits && val <= 100) m_progressCb(val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     });
 
     DWORD wait = WaitForSingleObject(pi.hProcess, (DWORD)timeoutMs);
@@ -142,8 +193,8 @@ CommandResult WSLBridge::RunProcess(const std::wstring& commandLine,
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    std::wstring decoded = utf16leOutput ? DecodeUTF16LE(rawOutput) : DecodeUTF8(rawOutput);
-    if (!decoded.empty()) log(L"OUT: " + decoded);
+    std::wstring decoded = DecodeBytes(rawOutput, enc);
+    if (!decoded.empty() && !stream) log(L"OUT: " + decoded); // streamed output was already logged
     log(L"# Exit code: " + std::to_wstring(exitCode));
     return {(int)exitCode, decoded, L""};
 }
@@ -158,12 +209,13 @@ void WSLBridge::log(const std::wstring& msg) {
 // ── PowerShell ───────────────────────────────────────────
 
 CommandResult WSLBridge::runPowerShell(const std::wstring& script, int timeoutMs) {
-    // Force UTF-8 output from PowerShell
+    // Force UTF-8 output; silence progress records (they go to stderr as CLIXML noise)
     std::wstring fullScript =
+        L"$ProgressPreference = 'SilentlyContinue'; "
         L"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script;
     std::wstring b64 = Base64Encode(fullScript.c_str(), fullScript.size() * sizeof(wchar_t));
     std::wstring cmd = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " + b64;
-    return RunProcess(cmd, timeoutMs, "", false); // UTF-8
+    return RunProcess(cmd, timeoutMs, "", OutEnc::UTF8);
 }
 
 // ── runWSL ───────────────────────────────────────────────
@@ -192,7 +244,7 @@ CommandResult WSLBridge::runWSL(const std::wstring& command,
     if (!distro.empty()) cmd += L" -d " + distro;
     if (!user.empty()) cmd += L" -u " + user;
     cmd += L" -- bash -c '" + bashEsc(command) + L"'";
-    return RunProcess(cmd, timeoutMs, stdinData, false);
+    return RunProcess(cmd, timeoutMs, stdinData, OutEnc::UTF8);
 }
 
 bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
@@ -414,13 +466,13 @@ CommandResult WSLBridge::runWSLRoot(const std::wstring& command,
 CommandResult WSLBridge::runWSLMount(const std::vector<std::wstring>& args, int timeoutMs) {
     std::wstring cmd = L"wsl.exe";
     for (auto& a : args) cmd += L" " + a;
-    return RunProcess(cmd, timeoutMs, "", true); // wsl.exe native output is UTF-16LE
+    return RunProcess(cmd, timeoutMs, "", OutEnc::UTF16LE); // wsl.exe native output
 }
 
 // ── Checks ───────────────────────────────────────────────
 
 bool WSLBridge::checkWSLInstalled(std::wstring& msg) {
-    auto r = RunProcess(L"wsl.exe -l -v", 10000, "", true); // UTF-16LE
+    auto r = RunProcess(L"wsl.exe -l -v", 10000, "", OutEnc::UTF16LE);
     if (!r.success()) {
         msg = L"WSL2 is not installed or not configured";
         return false;
@@ -431,7 +483,7 @@ bool WSLBridge::checkWSLInstalled(std::wstring& msg) {
 
 std::vector<std::pair<std::wstring, bool>> WSLBridge::getDistros() {
     std::vector<std::pair<std::wstring, bool>> distros;
-    auto r = RunProcess(L"wsl.exe -l -v", 10000, "", true); // UTF-16LE
+    auto r = RunProcess(L"wsl.exe -l -v", 10000, "", OutEnc::UTF16LE);
     if (r.output.empty()) return distros;
 
     std::wstring line;

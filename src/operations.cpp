@@ -499,6 +499,105 @@ bool Operations::unmountAll(std::wstring& msg) {
     return failed == 0;
 }
 
+// ── VHDX Compaction ──────────────────────────────────────
+
+static uint64_t FileSizeOf(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return 0;
+    return ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+}
+
+std::wstring WSLImage::sizeDisplay() const { return FormatSize(sizeBytes); }
+
+// Enumerate all registered WSL distributions with their VHDX images
+std::vector<WSLImage> Operations::getWSLImages() {
+    std::vector<WSLImage> images;
+    auto r = bridge.runPowerShell(
+        L"Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss -EA SilentlyContinue"
+        L" | ForEach-Object { $p = Get-ItemProperty $_.PSPath;"
+        L" if ($p.DistributionName -and $p.BasePath) {"
+        L" \"$($p.DistributionName)`t$(Join-Path $p.BasePath 'ext4.vhdx')\" } }", 15000);
+    if (!r.success()) return images;
+
+    std::wistringstream ss(r.output);
+    std::wstring line;
+    while (std::getline(ss, line)) {
+        trimWS(line);
+        auto tab = line.find(L'\t');
+        if (tab == std::wstring::npos) continue;
+        WSLImage img;
+        img.name = line.substr(0, tab);
+        img.vhdxPath = line.substr(tab + 1);
+        if (img.vhdxPath.rfind(L"\\\\?\\", 0) == 0)
+            img.vhdxPath = img.vhdxPath.substr(4); // BasePath may carry a \\?\ prefix
+        img.sizeBytes = FileSizeOf(img.vhdxPath);
+        if (img.sizeBytes == 0) continue; // image file missing
+        images.push_back(std::move(img));
+    }
+    return images;
+}
+
+bool Operations::compactDistro(const std::wstring& distro, const std::wstring& vhdxPath,
+                               bool zeroFree, std::wstring& msg) {
+    const std::wstring& vhdx = vhdxPath;
+    uint64_t before = FileSizeOf(vhdx);
+    if (before == 0) { msg = L"VHDX file not found: " + vhdx; return false; }
+
+    // 2. Optionally zero free space inside the distro so compact can reclaim it.
+    //    dd exits non-zero when the disk fills up — that is expected.
+    if (zeroFree) {
+        bridge.note(L"=== Compact 1/3: zeroing free space inside '" + distro +
+                    L"' (can take many minutes, dd fills the disk then removes the file)...");
+        bridge.runWSLRoot(
+            L"sh -c 'dd if=/dev/zero of=/.wslpm_zerofill bs=1M 2>/dev/null; sync;"
+            L" rm -f /.wslpm_zerofill; sync'",
+            distro, 1800000);
+    }
+
+    // 3. Shut down WSL entirely to release the VHDX file lock
+    bridge.note(L"=== Compact 2/3: shutting down WSL...");
+    bridge.CloseSession();
+    auto rs = bridge.RunProcess(L"wsl.exe --shutdown", 60000, "", OutEnc::UTF16LE);
+    if (rs.exitCode != 0) { msg = L"wsl --shutdown failed"; return false; }
+    Sleep(3000); // give the utility VM time to release the file
+
+    // 4. Compact via diskpart (works without Hyper-V's Optimize-VHD)
+    wchar_t tmpDir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmpDir);
+    std::wstring scriptPath = std::wstring(tmpDir) + L"wslpm_compact.txt";
+    std::wstring scriptW =
+        L"select vdisk file=\"" + vhdx + L"\"\r\n"
+        L"attach vdisk readonly\r\n"
+        L"compact vdisk\r\n"
+        L"detach vdisk\r\n";
+    // diskpart reads /s scripts in the system ANSI codepage
+    int an = WideCharToMultiByte(CP_ACP, 0, scriptW.c_str(), (int)scriptW.size(), nullptr, 0, nullptr, nullptr);
+    std::string scriptA(an, 0);
+    WideCharToMultiByte(CP_ACP, 0, scriptW.c_str(), (int)scriptW.size(), scriptA.data(), an, nullptr, nullptr);
+    HANDLE hf = CreateFileW(scriptPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) { msg = L"Failed to write diskpart script"; return false; }
+    DWORD written;
+    WriteFile(hf, scriptA.data(), (DWORD)scriptA.size(), &written, nullptr);
+    CloseHandle(hf);
+
+    bridge.note(L"=== Compact 3/3: diskpart compact vdisk (progress below)...");
+    // diskpart prints in the console OEM codepage; stream progress lines to the log
+    auto rd = bridge.RunProcess(L"diskpart /s \"" + scriptPath + L"\"", 1800000, "",
+                                OutEnc::OEM, true);
+    DeleteFileW(scriptPath.c_str());
+    if (rd.exitCode != 0) {
+        msg = L"diskpart compact failed (exit code " + std::to_wstring(rd.exitCode) + L"): " + rd.output;
+        return false;
+    }
+
+    uint64_t after = FileSizeOf(vhdx);
+    uint64_t saved = before > after ? before - after : 0;
+    msg = L"VHDX compacted: " + FormatSize(before) + L" → " + FormatSize(after) +
+          L" (saved " + FormatSize(saved) + L")";
+    return true;
+}
+
 // ── Explorer Integration ─────────────────────────────────
 
 bool Operations::createShortcut(const std::wstring& distro, const std::wstring& mountPoint,

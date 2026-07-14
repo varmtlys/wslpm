@@ -25,6 +25,7 @@ private:
     // Utilities
     static std::wstring PromptPassword(HWND parent, const std::wstring& title, const std::wstring& text);
     static INT_PTR CALLBACK PasswordDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+    static INT_PTR CALLBACK CompactDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
     void initEnv();
     void refreshDisks();
@@ -35,6 +36,7 @@ private:
     void doUnmount(int idx);
     void doEject(int idx);
     void doOpen(int idx);
+    void doCompact();
     void unmountAll();
     void updateMountedList();
     void setStatus(const std::wstring& text);
@@ -55,8 +57,10 @@ private:
     HWND m_btnMount = nullptr;
     HWND m_lvMounted = nullptr;
     HWND m_btnUnmount = nullptr, m_btnEject = nullptr, m_btnOpen = nullptr;
-    HWND m_btnRefresh = nullptr, m_btnUnmountAll = nullptr;
+    HWND m_btnRefresh = nullptr, m_btnUnmountAll = nullptr, m_btnCompact = nullptr;
     HWND m_statusBar = nullptr;
+    HWND m_progress = nullptr;
+    bool m_progressMarquee = false;
 
     // Theme
     HBRUSH m_brBg = nullptr, m_brInput = nullptr, m_brSidebar = nullptr, m_brDark = nullptr;
