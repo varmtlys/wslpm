@@ -71,7 +71,7 @@ public:
                   int diskNum, int partNum, std::wstring& msg);
 
     // Unmount
-    bool unmountVolume(int index, std::wstring& msg);
+    bool unmountByMountPoint(const std::wstring& mountPoint, std::wstring& msg);
     bool unmountAll(std::wstring& msg);
 
     // Explorer integration

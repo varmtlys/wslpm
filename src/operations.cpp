@@ -5,6 +5,22 @@
 
 // ── Helpers ──────────────────────────────────────────────
 
+// Quote a string as a single-quoted bash argument ('\'' escaping)
+static std::wstring q(const std::wstring& s) {
+    std::wstring r = L"'";
+    for (wchar_t c : s) {
+        if (c == L'\'') r += L"'\\''";
+        else r += c;
+    }
+    r += L"'";
+    return r;
+}
+
+static void trimWS(std::wstring& s) {
+    while (!s.empty() && (s.back()==L'\r'||s.back()==L'\n'||s.back()==L' '||s.back()==L'\t')) s.pop_back();
+    while (!s.empty() && (s.front()==L' '||s.front()==L'\t')) s.erase(s.begin());
+}
+
 static std::wstring FormatSize(uint64_t bytes) {
     const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
     double sz = (double)bytes;
@@ -58,7 +74,7 @@ bool Operations::ensureTools(const std::wstring& distro,
 }
 
 bool Operations::createMountPoint(const std::wstring& path, const std::wstring& distro) {
-    return bridge.runWSLRoot(L"mkdir -p '" + path + L"'", distro).success();
+    return bridge.runWSLRoot(L"mkdir -p " + q(path), distro).success();
 }
 
 // ── Disk Discovery ───────────────────────────────────────
@@ -129,12 +145,15 @@ bool Operations::attachDisk(int diskNum, bool bare, std::wstring& msg) {
     auto r = bridge.runWSLMount(args, 30000);
     
     msg = r.output.empty() ? r.error : r.output;
-    if (r.success() || msg.find(L"already") != std::wstring::npos || msg.find(L"ALREADY_ATTACHED") != std::wstring::npos) {
+    if (r.success() || msg.find(L"already") != std::wstring::npos
+        || msg.find(L"ALREADY_ATTACHED") != std::wstring::npos
+        || msg.find(L"уже") != std::wstring::npos) {  // localized wsl.exe output
         msg = L"Disk attached to WSL";
         return true;
     }
 
-    if (msg.find(L"access") != std::wstring::npos || msg.find(L"denied") != std::wstring::npos)
+    if (msg.find(L"access") != std::wstring::npos || msg.find(L"denied") != std::wstring::npos
+        || msg.find(L"Отказано") != std::wstring::npos || msg.find(L"отказано") != std::wstring::npos)
         msg = L"Access denied. Administrator privileges required.";
     return false;
 }
@@ -146,7 +165,9 @@ bool Operations::attachPartition(int diskNum, int partNum, const std::wstring& f
     auto r = bridge.runWSLMount(args, 30000);
 
     msg = r.output.empty() ? r.error : r.output;
-    if (r.success() || msg.find(L"already") != std::wstring::npos || msg.find(L"ALREADY_ATTACHED") != std::wstring::npos) {
+    if (r.success() || msg.find(L"already") != std::wstring::npos
+        || msg.find(L"ALREADY_ATTACHED") != std::wstring::npos
+        || msg.find(L"уже") != std::wstring::npos) {  // localized wsl.exe output
         msg = L"Partition attached to WSL";
         return true;
     }
@@ -181,7 +202,7 @@ bool Operations::safeEject(int diskNum, std::wstring& msg) {
 // ── Detection ────────────────────────────────────────────
 
 std::wstring Operations::detectVolumeType(const std::wstring& device, const std::wstring& distro) {
-    auto r = bridge.runWSLRoot(L"blkid -o value -s TYPE '" + device + L"' 2>/dev/null", distro);
+    auto r = bridge.runWSLRoot(L"blkid -o value -s TYPE " + q(device) + L" 2>/dev/null", distro);
     if (r.success()) {
         auto t = r.output; while (!t.empty()&&(t.back()==L'\r'||t.back()==L'\n')) t.pop_back();
         if (t == L"crypto_LUKS") return L"luks";
@@ -193,7 +214,7 @@ std::wstring Operations::detectVolumeType(const std::wstring& device, const std:
 
 std::wstring Operations::findWSLDevice(int diskNum, int partNum, uint64_t diskSize, uint64_t expectedSize, const std::wstring& distro) {
     auto r = bridge.runWSL(L"lsblk -b -n -o NAME,SIZE,TYPE -l 2>/dev/null", distro);
-    if (!r.success()) return L"/dev/sd" + std::wstring(1, L'd' + (diskNum % 4)) + (partNum > 0 ? std::to_wstring(partNum) : L"");
+    if (!r.success()) return L"";  // cannot enumerate — do not guess a device
 
     std::wistringstream ss(r.output);
     std::wstring line;
@@ -231,8 +252,7 @@ std::wstring Operations::findWSLDevice(int diskNum, int partNum, uint64_t diskSi
     // If partition not found explicitly (or we want the whole disk), fallback to the disk size match.
     if (!disks.empty()) return L"/dev/" + disks[0].name + (partNum > 0 ? std::to_wstring(partNum) : L"");
 
-    // Last resort fallback
-    return L"/dev/sd" + std::wstring(1, L'd' + (diskNum % 4)) + (partNum > 0 ? std::to_wstring(partNum) : L"");
+    return L"";  // nothing matched by size — do not guess a device
 }
 
 // ── Mount Plain ──────────────────────────────────────────
@@ -243,8 +263,8 @@ bool Operations::mountPlain(const std::wstring& device, const std::wstring& moun
     std::wstring cmd = L"mount";
     if (!fsType.empty() && fsType != L"auto") cmd += L" -t " + fsType;
     if (readOnly) cmd += L" -o ro";
-    cmd += L" '" + device + L"' '" + mountPoint + L"'";
-    
+    cmd += L" " + q(device) + L" " + q(mountPoint);
+
     auto r = bridge.runWSLRoot(cmd, distro, 30000);
     if (r.success()) {
         { std::lock_guard<std::mutex> lk(m_mtx);
@@ -275,6 +295,19 @@ bool Operations::mountLUKS(const std::wstring& device, const std::wstring& mount
     if (!ensureTools(distro, {L"cryptsetup"}, msg)) return false;
     if (!createMountPoint(mountPoint, distro)) { msg = L"Failed to create mount point"; return false; }
 
+    // Convert a Windows keyfile path (C:\...) to a WSL path (/mnt/c/...)
+    std::wstring kf = keyfile;
+    if (!kf.empty() && (kf.find(L'\\') != std::wstring::npos ||
+                        (kf.size() > 1 && kf[1] == L':'))) {
+        std::wstring winPath = kf;
+        std::replace(winPath.begin(), winPath.end(), L'\\', L'/');
+        auto rp = bridge.runWSL(L"wslpath -u " + q(winPath), distro);
+        if (!rp.success()) { msg = L"Failed to convert keyfile path to WSL path"; return false; }
+        kf = rp.output;
+        trimWS(kf);
+        if (kf.empty()) { msg = L"Failed to convert keyfile path to WSL path"; return false; }
+    }
+
     wchar_t nameBuf[64]; swprintf_s(nameBuf, L"luks_d%dp%d", diskNum, partNum);
     std::wstring luksName = nameBuf;
 
@@ -290,7 +323,7 @@ bool Operations::mountLUKS(const std::wstring& device, const std::wstring& mount
         std::wstring cmd = L"mount";
         if (!innerFS.empty() && innerFS != L"auto") cmd += L" -t " + innerFS;
         if (readOnly) cmd += L" -o ro";
-        cmd += L" '" + mapper + L"' '" + mountPoint + L"'";
+        cmd += L" " + q(mapper) + L" " + q(mountPoint);
         auto r = bridge.runWSLRoot(cmd, distro, 30000);
         if (r.success()) {
             { std::lock_guard<std::mutex> lk(m_mtx);
@@ -306,10 +339,10 @@ bool Operations::mountLUKS(const std::wstring& device, const std::wstring& mount
     if (!pwd.empty() && pwd.back() != '\n') pwd += '\n';
 
     for(int i=0; i<3; i++) {
-        if (!keyfile.empty()) {
-            r = bridge.runWSLRoot(L"cryptsetup luksOpen '" + device + L"' '" + luksName + L"' --key-file '" + keyfile + L"'", distro);
+        if (!kf.empty()) {
+            r = bridge.runWSLRoot(L"cryptsetup luksOpen " + q(device) + L" " + q(luksName) + L" --key-file " + q(kf), distro);
         } else {
-            r = bridge.runWSLRoot(L"cryptsetup luksOpen '" + device + L"' '" + luksName + L"' -d -", distro, 60000, pwd);
+            r = bridge.runWSLRoot(L"cryptsetup luksOpen " + q(device) + L" " + q(luksName) + L" -d -", distro, 60000, pwd);
         }
         if (r.success()) break;
         if (r.output.find(L"does not exist") == std::wstring::npos) break;
@@ -348,14 +381,14 @@ bool Operations::mountLUKS(const std::wstring& device, const std::wstring& mount
     std::wstring cmd = L"mount";
     if (!innerFS.empty() && innerFS != L"auto") cmd += L" -t " + innerFS;
     if (readOnly) cmd += L" -o ro";
-    cmd += L" '" + mapper + L"' '" + mountPoint + L"'";
+    cmd += L" " + q(mapper) + L" " + q(mountPoint);
     r = bridge.runWSLRoot(cmd, distro, 30000);
     if (r.success()) {
         { std::lock_guard<std::mutex> lk(m_mtx);
         m_mounted.push_back({mapper, mountPoint, L"luks", diskNum, luksName, L"", L"", distro}); }
         msg = L"LUKS volume mounted at " + mountPoint; return true;
     }
-    bridge.runWSLRoot(L"cryptsetup luksClose '" + luksName + L"'", distro);
+    bridge.runWSLRoot(L"cryptsetup luksClose " + q(luksName), distro);
     msg = L"LUKS opened but mount failed";
     return false;
 }
@@ -370,15 +403,14 @@ bool Operations::mountLVM(const std::wstring& device, const std::wstring& mountP
 
     bridge.runWSLRoot(L"pvscan --cache 2>/dev/null && vgscan 2>/dev/null && lvscan 2>/dev/null", distro, 15000);
 
-    auto r = bridge.runWSLRoot(L"pvs --noheadings -o vg_name '" + device + L"' 2>/dev/null", distro);
+    auto r = bridge.runWSLRoot(L"pvs --noheadings -o vg_name " + q(device) + L" 2>/dev/null", distro);
     std::wstring vg = r.output;
-    while (!vg.empty() && (vg.back() == L'\r' || vg.back() == L'\n' || vg.back() == L' ')) vg.pop_back();
-    while (!vg.empty() && vg.front() == L' ') vg.erase(vg.begin());
+    trimWS(vg);
     if (vg.empty()) { msg = L"LVM volume group not found"; return false; }
 
-    bridge.runWSLRoot(L"vgchange -ay '" + vg + L"' 2>/dev/null", distro);
+    bridge.runWSLRoot(L"vgchange -ay " + q(vg) + L" 2>/dev/null", distro);
 
-    r = bridge.runWSLRoot(L"lvs --noheadings -o lv_name '" + vg + L"' 2>/dev/null", distro);
+    r = bridge.runWSLRoot(L"lvs --noheadings -o lv_name " + q(vg) + L" 2>/dev/null", distro);
     std::vector<std::wstring> lvs;
     std::wistringstream ss(r.output);
     std::wstring lv;
@@ -398,7 +430,7 @@ bool Operations::mountLVM(const std::wstring& device, const std::wstring& mountP
         std::wstring cmd = L"mount";
         if (!fs.empty() && fs != L"auto" && fs != L"lvm" && fs != L"luks") cmd += L" -t " + fs;
         if (readOnly) cmd += L" -o ro";
-        cmd += L" '" + lvDev + L"' '" + mp + L"'";
+        cmd += L" " + q(lvDev) + L" " + q(mp);
         if (bridge.runWSLRoot(cmd, distro, 30000).success()) {
             { std::lock_guard<std::mutex> lk(m_mtx);
             m_mounted.push_back({lvDev, mp, L"lvm", diskNum, L"", vg, lv, distro}); }
@@ -414,35 +446,57 @@ bool Operations::mountLVM(const std::wstring& device, const std::wstring& mountP
 
 // ── Unmount ──────────────────────────────────────────────
 
-bool Operations::unmountVolume(int index, std::wstring& msg) {
-    std::lock_guard<std::mutex> lk(m_mtx);
-    if (index < 0 || index >= (int)m_mounted.size()) { msg = L"Invalid index"; return false; }
-    auto& v = m_mounted[index];
+bool Operations::unmountByMountPoint(const std::wstring& mountPoint, std::wstring& msg) {
+    // Copy volume info under lock, run slow WSL commands without it
+    MountedVolume v;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (auto& m : m_mounted) {
+            if (m.mountPoint == mountPoint) { v = m; found = true; break; }
+        }
+    }
+    if (!found) { msg = L"Volume not found"; return false; }
     auto d = v.distro;
 
-    auto r = bridge.runWSLRoot(L"umount '" + v.mountPoint + L"' 2>/dev/null", d);
+    auto r = bridge.runWSLRoot(L"umount " + q(v.mountPoint) + L" 2>/dev/null", d);
     if (!r.success()) {
-        r = bridge.runWSLRoot(L"umount -l '" + v.mountPoint + L"' 2>/dev/null", d);
+        r = bridge.runWSLRoot(L"umount -l " + q(v.mountPoint) + L" 2>/dev/null", d);
         if (!r.success()) { msg = L"Failed to unmount. Volume may be busy."; return false; }
     }
     if (!v.lvmVG.empty())
-        bridge.runWSLRoot(L"vgchange -an '" + v.lvmVG + L"' 2>/dev/null", d);
+        bridge.runWSLRoot(L"vgchange -an " + q(v.lvmVG) + L" 2>/dev/null", d);
     if (!v.luksName.empty())
-        bridge.runWSLRoot(L"cryptsetup luksClose '" + v.luksName + L"' 2>/dev/null", d);
+        bridge.runWSLRoot(L"cryptsetup luksClose " + q(v.luksName) + L" 2>/dev/null", d);
 
-    m_mounted.erase(m_mounted.begin() + index);
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (auto it = m_mounted.begin(); it != m_mounted.end(); ++it) {
+            if (it->mountPoint == mountPoint) { m_mounted.erase(it); break; }
+        }
+    }
     msg = L"Volume unmounted";
     return true;
 }
 
 bool Operations::unmountAll(std::wstring& msg) {
-    int n = 0;
-    while (!m_mounted.empty()) {
-        std::wstring m;
-        if (unmountVolume((int)m_mounted.size() - 1, m)) n++;
+    std::vector<std::wstring> mps;
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        for (auto& m : m_mounted) mps.push_back(m.mountPoint);
     }
-    wchar_t buf[64]; swprintf_s(buf, L"Unmounted %d volume(s)", n);
-    msg = buf; return n > 0;
+    int n = 0, failed = 0;
+    for (auto& mp : mps) {
+        std::wstring m;
+        if (unmountByMountPoint(mp, m)) n++; else failed++;
+    }
+    wchar_t buf[96];
+    if (failed > 0)
+        swprintf_s(buf, L"Unmounted %d volume(s), %d failed (busy?)", n, failed);
+    else
+        swprintf_s(buf, L"Unmounted %d volume(s)", n);
+    msg = buf;
+    return failed == 0;
 }
 
 // ── Explorer Integration ─────────────────────────────────

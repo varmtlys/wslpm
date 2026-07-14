@@ -123,7 +123,7 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         FillRect(hdc, &sb, m_brSidebar);
         // Toolbar area
         RECT tb = rc; tb.left = 0; tb.bottom = Theme::TOOLBAR_H;
-        FillRect(hdc, &tb, CreateSolidBrush(Theme::BG_DARK));
+        FillRect(hdc, &tb, m_brDark);
         return 1;
     }
     case WM_CTLCOLORSTATIC:
@@ -133,8 +133,7 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         return (LRESULT)onCtlColor((HDC)wp, (HWND)lp, msg);
     case WM_APP_DISKS_LOADED:
         if (m_terminating) return 0;
-        m_disks = m_ops.getPhysicalDisks(); // already loaded in bg, refresh UI
-        refreshDisksUI(); return 0;
+        refreshDisksUI(); return 0; // m_disks already filled by the background thread
     case WM_APP_DISTROS_LOADED:
         if (m_terminating) return 0;
         SendMessageW(m_comboDistro, CB_RESETCONTENT, 0, 0);
@@ -486,7 +485,12 @@ void AppWindow::onCommand(WORD id, WORD code, HWND ctl) {
             } else break;
         }
         
-        auto r = m_ops.bridge.runWSLRoot(L"mkdir -p '" + std::wstring(path) + L"'", distro);
+        std::wstring escPath;
+        for (wchar_t c : std::wstring(path)) {
+            if (c == L'\'') escPath += L"'\\''";
+            else escPath += c;
+        }
+        auto r = m_ops.bridge.runWSLRoot(L"mkdir -p '" + escPath + L"'", distro);
         if (r.success()) {
             MessageBoxW(m_hwnd, L"Directory created successfully!", L"Info", MB_ICONINFORMATION);
         } else {
@@ -615,7 +619,7 @@ void AppWindow::doMount() {
     int partNum = (partSel <= 0) ? 0 : disk.partitions[partSel - 1].number;
 
     std::wstring volType = L"auto";
-    const wchar_t* typeNames[] = {L"auto", L"luks", L"lvm", L"ext4", L"xfs", L"btrfs", L"ntfs-3g", L"vfat"};
+    const wchar_t* typeNames[] = {L"auto", L"luks", L"lvm", L"ext4", L"xfs", L"btrfs", L"ntfs3", L"vfat"};
     for (int i = 0; i < 8; i++) {
         if (SendMessageW(m_radios[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { volType = typeNames[i]; break; }
     }
@@ -692,6 +696,14 @@ void AppWindow::doMount() {
             uint64_t partSize = (partSel > 0 && partSel - 1 < (int)disk.partitions.size())
                 ? disk.partitions[partSel - 1].sizeBytes : disk.sizeBytes;
             auto dev = m_ops.findWSLDevice(diskNum, partNum, disk.sizeBytes, partSize, distro);
+            if (dev.empty()) {
+                std::wstring dummy;
+                m_ops.detachDisk(diskNum, dummy);
+                m_pendingThreads--;
+                PostMessageW(m_hwnd, WM_APP_MOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(false,
+                    L"Could not find the attached device inside WSL (no size match in lsblk)."));
+                return;
+            }
             ok = m_ops.mountPlain(dev, mountPoint, fs, distro, readOnly, diskNum, partNum, msg);
             if (!ok && msg == L"SUDO_PASSWORD_REQUIRED")
                 msg = L"Sudo authorization required. Enter password and try again.";
@@ -706,25 +718,28 @@ void AppWindow::doMount() {
             expectedSize = disk.partitions[partSel - 1].sizeBytes;
         }
         auto device = m_ops.findWSLDevice(diskNum, partNum, disk.sizeBytes, expectedSize, distro);
-
-        // Step 3: Auto-detect
-        std::wstring actualType = volType;
-        if (actualType == L"auto") {
-            actualType = m_ops.detectVolumeType(device, distro);
-        }
-
-        // Step 4: Mount (single attempt — all passwords collected on UI thread)
-        if (actualType == L"luks") {
-            if (currentPwd.empty() && keyfile.empty()) {
-                msg = L"Auto-detection found LUKS but no password provided. Select LUKS type explicitly and enter password.";
-                goto mount_fail;
-            }
-            ok = m_ops.mountLUKS(device, mountPoint, currentPwd, keyfile, L"", distro, readOnly, diskNum, partNum, msg);
-        } else if (actualType == L"lvm") {
-            ok = m_ops.mountLVM(device, mountPoint, distro, readOnly, diskNum, partNum, msg);
+        if (device.empty()) {
+            msg = L"Could not find the attached device inside WSL (no size match in lsblk).";
         } else {
-            std::wstring fs = (actualType != L"auto") ? actualType : L"";
-            ok = m_ops.mountPlain(device, mountPoint, fs, distro, readOnly, diskNum, partNum, msg);
+            // Step 3: Auto-detect
+            std::wstring actualType = volType;
+            if (actualType == L"auto") {
+                actualType = m_ops.detectVolumeType(device, distro);
+            }
+
+            // Step 4: Mount (single attempt — all passwords collected on UI thread)
+            if (actualType == L"luks") {
+                if (currentPwd.empty() && keyfile.empty()) {
+                    msg = L"Auto-detection found LUKS but no password provided. Select LUKS type explicitly and enter password.";
+                } else {
+                    ok = m_ops.mountLUKS(device, mountPoint, currentPwd, keyfile, L"", distro, readOnly, diskNum, partNum, msg);
+                }
+            } else if (actualType == L"lvm") {
+                ok = m_ops.mountLVM(device, mountPoint, distro, readOnly, diskNum, partNum, msg);
+            } else {
+                std::wstring fs = (actualType != L"auto") ? actualType : L"";
+                ok = m_ops.mountPlain(device, mountPoint, fs, distro, readOnly, diskNum, partNum, msg);
+            }
         }
 
         if (!ok && msg == L"SUDO_PASSWORD_REQUIRED") {
@@ -737,24 +752,28 @@ void AppWindow::doMount() {
         }
 
         if (!ok) {
-        mount_fail:
             std::wstring dummy;
             m_ops.detachDisk(diskNum, dummy);
-            PostMessageW(m_hwnd, WM_APP_MOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(false, msg));
-        } else {
-            PostMessageW(m_hwnd, WM_APP_MOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(true, msg));
         }
+        PostMessageW(m_hwnd, WM_APP_MOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(ok, msg));
         m_pendingThreads--;
     }).detach();
 }
 
 void AppWindow::doUnmount(int idx) {
+    // Snapshot the mount point at click time — the list may change before the thread runs
+    std::wstring mp;
+    {
+        std::lock_guard<std::mutex> lk(m_ops.mtx());
+        if (idx < 0 || idx >= (int)m_ops.mounted().size()) return;
+        mp = m_ops.mounted()[idx].mountPoint;
+    }
     if (MessageBoxW(m_hwnd, L"Unmount selected volume?", L"Confirm",
                      MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     m_pendingThreads++;
     std::thread([=]() {
         std::wstring msg;
-        m_ops.unmountVolume(idx, msg);
+        m_ops.unmountByMountPoint(mp, msg);
         if (!m_terminating) PostMessageW(m_hwnd, WM_APP_UNMOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(true, msg));
         m_pendingThreads--;
     }).detach();
@@ -772,14 +791,14 @@ void AppWindow::doEject(int idx) {
     m_pendingThreads++;
     std::thread([=]() {
         std::wstring msg;
-        std::vector<int> toUnmount;
+        std::vector<std::wstring> toUnmount;
         {
             std::lock_guard<std::mutex> lk(m_ops.mtx());
-            for (int i = (int)m_ops.mounted().size() - 1; i >= 0; i--) {
-                if (m_ops.mounted()[i].diskNumber == diskNum) toUnmount.push_back(i);
+            for (auto& v : m_ops.mounted()) {
+                if (v.diskNumber == diskNum) toUnmount.push_back(v.mountPoint);
             }
         }
-        for (int idx : toUnmount) m_ops.unmountVolume(idx, msg);
+        for (auto& mp : toUnmount) m_ops.unmountByMountPoint(mp, msg);
         m_ops.safeEject(diskNum, msg);
         if (!m_terminating) PostMessageW(m_hwnd, WM_APP_UNMOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(true, msg));
         m_pendingThreads--;
@@ -868,6 +887,7 @@ INT_PTR CALLBACK AppWindow::PasswordDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPAR
 }
 
 void AppWindow::onDestroy() {
+    if (m_terminating) return; // re-entrant WM_CLOSE while pumping messages below
     m_terminating = true;
     // Wait for background threads to finish
     while (m_pendingThreads > 0) {

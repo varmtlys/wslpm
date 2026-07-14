@@ -216,6 +216,7 @@ bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
     bool pwdSent = false;
     bool finished = false;
     int exitCode = -1;
+    size_t promptScanPos = 0;
     ULONGLONG start = GetTickCount64();
 
     while (GetTickCount64() - start < 15000) {
@@ -223,11 +224,21 @@ bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
         if (PeekNamedPipe(m_session->hOut, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
             if (ReadFile(m_session->hOut, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
                 output.append(buf, bytesRead);
-                
-                if (!pwdSent && output.find("SUDO_PROMPT") != std::string::npos) {
-                    WriteFile(m_session->hIn, pwd.data(), (DWORD)pwd.size(), &written, nullptr);
-                    pwdSent = true;
-                    log(L"Sudo: password sent.");
+
+                size_t promptPos = output.find("SUDO_PROMPT", promptScanPos);
+                if (promptPos != std::string::npos) {
+                    if (!pwdSent) {
+                        WriteFile(m_session->hIn, pwd.data(), (DWORD)pwd.size(), &written, nullptr);
+                        pwdSent = true;
+                        promptScanPos = promptPos + 11;
+                        log(L"Sudo: password sent.");
+                    } else {
+                        // A second prompt means the password was rejected;
+                        // kill the session so the pending prompt can't desync it
+                        log(L"! Sudo rejected the password");
+                        CloseSession();
+                        return false;
+                    }
                 }
 
                 size_t pos = output.find(mark);
@@ -245,6 +256,7 @@ bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
 
     if (!finished) {
         log(L"! Sudo authorization timed out");
+        CloseSession(); // leftover output would desync the session
         return false;
     }
 
@@ -271,8 +283,11 @@ bool WSLBridge::EnsureSession(const std::wstring& distro) {
     
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE hInR, hInW, hOutR, hOutW;
-    CreatePipe(&hInR, &hInW, &sa, 0);
-    CreatePipe(&hOutR, &hOutW, &sa, 0);
+    if (!CreatePipe(&hInR, &hInW, &sa, 0)) return false;
+    if (!CreatePipe(&hOutR, &hOutW, &sa, 0)) {
+        CloseHandle(hInR); CloseHandle(hInW);
+        return false;
+    }
     SetHandleInformation(hInW, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(hOutR, HANDLE_FLAG_INHERIT, 0);
 
@@ -366,6 +381,8 @@ CommandResult WSLBridge::runInSession(const std::wstring& command, int timeoutMs
         }
     }
     
+    // Leftover output/marker in the pipe would corrupt the next command — drop the session
+    CloseSession();
     return {-1, UTF8ToWide(output), L"Timeout waiting for command completion"};
 }
 

@@ -13,7 +13,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     InitCommonControlsEx(&icc);
 
     // Register and create main window
-    AppWindow::Register(hInstance);
+    if (!AppWindow::Register(hInstance)) {
+        MessageBoxW(nullptr, L"Failed to register window class", L"Error", MB_ICONERROR);
+        return 1;
+    }
     AppWindow app;
     if (!app.Create(hInstance)) {
         MessageBoxW(nullptr, L"Failed to create window", L"Error", MB_ICONERROR);
