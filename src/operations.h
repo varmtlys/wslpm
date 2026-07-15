@@ -77,6 +77,9 @@ public:
                   const std::wstring& distro, bool readOnly,
                   int diskNum, int partNum, std::wstring& msg);
 
+    // Pick up volumes still mounted from a previous run; returns how many were added
+    int rescanMounts(const std::wstring& distro);
+
     // Unmount
     bool unmountByMountPoint(const std::wstring& mountPoint, std::wstring& msg);
     bool unmountAll(std::wstring& msg);

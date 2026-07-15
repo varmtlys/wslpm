@@ -206,8 +206,13 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_NOTIFY: {
         auto* nm = (NMHDR*)lp;
-        if (nm->idFrom == IDC_MOUNTED_LV && nm->code == LVN_ITEMCHANGED)
-            updateSelButtons();
+        if (nm->idFrom == IDC_MOUNTED_LV) {
+            if (nm->code == LVN_ITEMCHANGED) updateSelButtons();
+            if (nm->code == NM_DBLCLK) {
+                int sel = ListView_GetNextItem(m_lvMounted, -1, LVNI_SELECTED);
+                if (sel >= 0) doOpen(sel);
+            }
+        }
         break;
     }
     case WM_CLOSE: onDestroy(); return 0;
@@ -375,6 +380,7 @@ void AppWindow::onCreate() {
 
     // ── Log Section ──
     MakeLabel(m_hwnd, hi, L"\U0001F50D  Command Log (debug)", rx, ry, 300, 22, m_fontBold);
+    MakeButton(m_hwnd, hi, L"\U0001F4CB Copy", rx + 310, ry - 2, 80, 22, m_font, IDC_BTN_COPY_LOG, true);
     ry += 24;
     m_editLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
@@ -561,6 +567,23 @@ void AppWindow::onCommand(WORD id, WORD code, HWND ctl) {
             SetWindowTextW(m_editKey, path);
         break;
     }
+    case IDC_BTN_COPY_LOG: {
+        int len = GetWindowTextLengthW(m_editLog);
+        std::wstring text(len + 1, 0);
+        GetWindowTextW(m_editLog, text.data(), len + 1);
+        if (OpenClipboard(m_hwnd)) {
+            EmptyClipboard();
+            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
+            if (hg) {
+                memcpy(GlobalLock(hg), text.c_str(), (len + 1) * sizeof(wchar_t));
+                GlobalUnlock(hg);
+                SetClipboardData(CF_UNICODETEXT, hg);
+            }
+            CloseClipboard();
+            setStatus(L"Log copied to clipboard");
+        }
+        break;
+    }
     case IDC_BTN_MOUNT:       doMount(); break;
     case IDC_BTN_REFRESH:     refreshDisks(); break;
     case IDC_BTN_UNMOUNT_ALL: unmountAll(); break;
@@ -623,6 +646,20 @@ void AppWindow::initEnv() {
 
     m_distros = m_ops.bridge.getDistros();
     PostMessageW(m_hwnd, WM_APP_DISTROS_LOADED, 0, 0);
+
+    // Pick up volumes left mounted by a previous run
+    std::wstring defDistro;
+    for (auto& [name, isDef] : m_distros) if (isDef) defDistro = name;
+    if (defDistro.empty() && !m_distros.empty()) defDistro = m_distros[0].first;
+    if (!defDistro.empty()) {
+        int n = m_ops.rescanMounts(defDistro);
+        if (n > 0 && !m_terminating) {
+            wchar_t buf[64];
+            swprintf_s(buf, L"Restored %d mount(s) from a previous session", n);
+            PostMessageW(m_hwnd, WM_APP_UNMOUNT_DONE, 0,
+                         (LPARAM)new std::pair<bool, std::wstring>(true, buf));
+        }
+    }
 
     m_disks = m_ops.getPhysicalDisks();
     PostMessageW(m_hwnd, WM_APP_DISKS_LOADED, 0, 0);

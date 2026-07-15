@@ -43,6 +43,7 @@
 
 // Log
 #define IDC_EDIT_LOG             1070
+#define IDC_BTN_COPY_LOG         1071
 
 // Toolbar
 #define IDC_BTN_REFRESH          1050

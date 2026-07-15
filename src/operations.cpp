@@ -266,6 +266,18 @@ bool Operations::mountPlain(const std::wstring& device, const std::wstring& moun
     cmd += L" " + q(device) + L" " + q(mountPoint);
 
     auto r = bridge.runWSLRoot(cmd, distro, 30000);
+
+    // Older WSL kernels lack the ntfs3 driver — retry with the legacy read-only one
+    if (!r.success() && fsType == L"ntfs3") {
+        std::wstring cmd2 = L"mount -t ntfs -o ro " + q(device) + L" " + q(mountPoint);
+        r = bridge.runWSLRoot(cmd2, distro, 30000);
+        if (r.success()) {
+            { std::lock_guard<std::mutex> lk(m_mtx);
+            m_mounted.push_back({device, mountPoint, L"ntfs", diskNum, L"", L"", L"", distro}); }
+            msg = L"Mounted read-only with the legacy ntfs driver (kernel has no ntfs3)";
+            return true;
+        }
+    }
     if (r.success()) {
         { std::lock_guard<std::mutex> lk(m_mtx);
         m_mounted.push_back({device, mountPoint, fsType.empty()?L"auto":fsType,
@@ -442,6 +454,53 @@ bool Operations::mountLVM(const std::wstring& device, const std::wstring& mountP
         msg = buf; return true;
     }
     msg = L"Failed to mount LVs"; return false;
+}
+
+// ── Rescan ───────────────────────────────────────────────
+
+int Operations::rescanMounts(const std::wstring& distro) {
+    auto r = bridge.runWSL(L"mount", distro);
+    if (!r.success()) return 0;
+
+    int added = 0;
+    std::wistringstream ss(r.output);
+    std::wstring line;
+    while (std::getline(ss, line)) {
+        // <device> on <mountpoint> type <fs> (options)
+        std::wistringstream ts(line);
+        std::wstring dev, on, mp, typeKw, fs;
+        if (!(ts >> dev >> on >> mp >> typeKw >> fs)) continue;
+        if (on != L"on" || typeKw != L"type") continue;
+        if (dev.rfind(L"/dev/", 0) != 0) continue;               // only block devices
+        if (mp.rfind(L"/mnt/", 0) != 0) continue;                // only our namespace
+        if (mp.rfind(L"/mnt/wsl", 0) == 0) continue;             // WSL internals
+        if (mp.size() == 6) continue;                            // /mnt/c drive letters
+        if (fs == L"9p" || fs == L"drvfs" || fs == L"virtiofs") continue;
+
+        std::lock_guard<std::mutex> lk(m_mtx);
+        bool known = false;
+        for (auto& v : m_mounted) if (v.mountPoint == mp) { known = true; break; }
+        if (known) continue;
+
+        MountedVolume v{dev, mp, fs, -1, L"", L"", L"", distro};
+        // Recover teardown info from the device path
+        if (dev.rfind(L"/dev/mapper/luks_", 0) == 0) {
+            v.luksName = dev.substr(12); // after "/dev/mapper/"
+            v.volumeType = L"luks";
+        } else {
+            auto s1 = dev.find(L'/', 5);
+            if (s1 != std::wstring::npos && dev.find(L'/', s1 + 1) == std::wstring::npos
+                && dev.rfind(L"/dev/mapper/", 0) != 0) {
+                // /dev/<vg>/<lv>
+                v.lvmVG = dev.substr(5, s1 - 5);
+                v.lvmLV = dev.substr(s1 + 1);
+                v.volumeType = L"lvm";
+            }
+        }
+        m_mounted.push_back(std::move(v));
+        added++;
+    }
+    return added;
 }
 
 // ── Unmount ──────────────────────────────────────────────
