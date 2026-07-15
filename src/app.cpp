@@ -327,7 +327,7 @@ void AppWindow::onCreate() {
     m_chkShortcut = MakeCheck(m_hwnd, hi, L"\U0001F4CC Create Explorer Shortcut",
                                rx, ry, 280, CH, m_font, IDC_CHECK_SHORTCUT, true);
     m_chkRO = MakeCheck(m_hwnd, hi, L"\U0001F512 Read Only",
-                         rx + 290, ry, 200, CH, m_font, IDC_CHECK_READONLY);
+                         rx + 290, ry, 200, CH, m_font, IDC_CHECK_READONLY, true);
     ry += CH + G + 4;
 
     // Mount button
@@ -649,6 +649,13 @@ void AppWindow::doMount() {
     }
 
     auto& disk = m_disks[m_selDisk];
+    if (disk.isSystem || disk.isBoot) {
+        MessageBoxW(m_hwnd,
+            L"This is a system/boot disk. Attaching it to WSL would take it away\n"
+            L"from Windows and can crash the system. Mounting is blocked.",
+            L"Blocked", MB_ICONERROR);
+        return;
+    }
     int partSel = (int)SendMessageW(m_comboPart, CB_GETCURSEL, 0, 0);
     int partNum = (partSel <= 0) ? 0 : disk.partitions[partSel - 1].number;
 
@@ -660,9 +667,22 @@ void AppWindow::doMount() {
 
     wchar_t mpBuf[260]; GetWindowTextW(m_editMP, mpBuf, 260);
     std::wstring mountPoint = mpBuf;
-    if (mountPoint.empty() || mountPoint[0] != L'/') {
-        MessageBoxW(m_hwnd, L"Enter a valid mount point (starting with /)",
+    while (!mountPoint.empty() && mountPoint.back() == L' ') mountPoint.pop_back();
+    while (!mountPoint.empty() && mountPoint.front() == L' ') mountPoint.erase(mountPoint.begin());
+    if (mountPoint.size() < 2 || mountPoint[0] != L'/' ||
+        mountPoint.find(L"..") != std::wstring::npos) {
+        MessageBoxW(m_hwnd, L"Enter a valid mount point (absolute path like /mnt/data, no \"..\")",
                      L"Error", MB_ICONERROR); return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_ops.mtx());
+        for (auto& v : m_ops.mounted()) {
+            if (v.mountPoint == mountPoint) {
+                MessageBoxW(m_hwnd, (L"Mount point " + mountPoint + L" is already in use by " +
+                            v.device).c_str(), L"Error", MB_ICONERROR);
+                return;
+            }
+        }
     }
 
     wchar_t distroBuf[128]; int dSel = (int)SendMessageW(m_comboDistro, CB_GETCURSEL, 0, 0);
@@ -688,11 +708,12 @@ void AppWindow::doMount() {
         }
     }
 
-    // Sudo password — collect on UI thread
+    // Sudo password — collect on UI thread; cancelling aborts the mount
     if (m_ops.bridge.wslPassword().empty()) {
         std::wstring sp = PromptPassword(m_hwnd, L"Sudo",
             L"WSL commands require sudo privileges.\r\nEnter your WSL user password:");
-        if (!sp.empty()) m_ops.bridge.setWslPassword(sp);
+        if (sp.empty()) { setStatus(L"Mount cancelled"); return; }
+        m_ops.bridge.setWslPassword(sp);
     }
 
     EnableWindow(m_btnMount, FALSE);

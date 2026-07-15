@@ -288,6 +288,7 @@ bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
                         // A second prompt means the password was rejected;
                         // kill the session so the pending prompt can't desync it
                         log(L"! Sudo rejected the password");
+                        m_wslUserPassword.clear(); // force a re-prompt next time
                         CloseSession();
                         return false;
                     }
@@ -315,8 +316,12 @@ bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
     m_session->authorized = (exitCode == 0);
     m_sudoAuthorized = (exitCode == 0);
     
-    if (m_sudoAuthorized) log(L"Sudo session authorized successfully.");
-    else log(L"Sudo authorization failed (exit code " + std::to_wstring(exitCode) + L").");
+    if (m_sudoAuthorized) {
+        log(L"Sudo session authorized successfully.");
+    } else {
+        log(L"Sudo authorization failed (exit code " + std::to_wstring(exitCode) + L").");
+        m_wslUserPassword.clear(); // force a re-prompt next time
+    }
 
     return m_sudoAuthorized;
 }
