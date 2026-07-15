@@ -21,6 +21,24 @@ static void trimWS(std::wstring& s) {
     while (!s.empty() && (s.front()==L' '||s.front()==L'\t')) s.erase(s.begin());
 }
 
+static std::wstring mountCmd(const std::wstring& fs, bool readOnly,
+                             const std::wstring& device, const std::wstring& mountPoint) {
+    std::wstring cmd = L"mount";
+    if (!fs.empty() && fs != L"auto" && fs != L"lvm" && fs != L"luks") cmd += L" -t " + fs;
+    if (readOnly) cmd += L" -o ro";
+    return cmd + L" " + q(device) + L" " + q(mountPoint);
+}
+
+// Did the command fail because sudo wanted a password?
+static bool sudoRefused(const CommandResult& r) {
+    if (r.success()) return false;
+    auto c = r.output + L" " + r.error;
+    return c.find(L"password is required") != std::wstring::npos ||
+           c.find(L"incorrect password") != std::wstring::npos ||
+           c.find(L"Sorry, try again") != std::wstring::npos ||
+           (c.find(L"sudo:") != std::wstring::npos && c.find(L"password") != std::wstring::npos);
+}
+
 static std::wstring FormatSize(uint64_t bytes) {
     const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
     double sz = (double)bytes;
@@ -260,17 +278,12 @@ std::wstring Operations::findWSLDevice(int diskNum, int partNum, uint64_t diskSi
 bool Operations::mountPlain(const std::wstring& device, const std::wstring& mountPoint,
                              const std::wstring& fsType, const std::wstring& distro,
                              bool readOnly, int diskNum, int partNum, std::wstring& msg) {
-    std::wstring cmd = L"mount";
-    if (!fsType.empty() && fsType != L"auto") cmd += L" -t " + fsType;
-    if (readOnly) cmd += L" -o ro";
-    cmd += L" " + q(device) + L" " + q(mountPoint);
-
-    auto r = bridge.runWSLRoot(cmd, distro, 30000);
+    createMountPoint(mountPoint, distro);
+    auto r = bridge.runWSLRoot(mountCmd(fsType, readOnly, device, mountPoint), distro, 30000);
 
     // Older WSL kernels lack the ntfs3 driver — retry with the legacy read-only one
     if (!r.success() && fsType == L"ntfs3") {
-        std::wstring cmd2 = L"mount -t ntfs -o ro " + q(device) + L" " + q(mountPoint);
-        r = bridge.runWSLRoot(cmd2, distro, 30000);
+        r = bridge.runWSLRoot(mountCmd(L"ntfs", true, device, mountPoint), distro, 30000);
         if (r.success()) {
             { std::lock_guard<std::mutex> lk(m_mtx);
             m_mounted.push_back({device, mountPoint, L"ntfs", diskNum, L"", L"", L"", distro}); }
@@ -285,14 +298,10 @@ bool Operations::mountPlain(const std::wstring& device, const std::wstring& moun
         msg = L"Volume mounted at " + mountPoint; return true;
     }
 
-    auto combined = r.output + L" " + r.error;
-    if (combined.find(L"password is required") != std::wstring::npos || 
-        combined.find(L"incorrect password") != std::wstring::npos ||
-        combined.find(L"Sorry, try again") != std::wstring::npos ||
-        (r.exitCode != 0 && combined.find(L"sudo:") != std::wstring::npos && combined.find(L"password") != std::wstring::npos && combined.find(L"mkdir") == std::wstring::npos)) {
-        // Only if it really looks like a sudo refusal
+    if (sudoRefused(r)) {
         msg = L"SUDO_PASSWORD_REQUIRED";
     } else {
+        auto combined = r.output + L" " + r.error;
         msg = L"Mount error: " + (combined.empty() ? L"exit code " + std::to_wstring(r.exitCode) : combined);
     }
     return false;
@@ -322,79 +331,44 @@ bool Operations::mountLUKS(const std::wstring& device, const std::wstring& mount
 
     wchar_t nameBuf[64]; swprintf_s(nameBuf, L"luks_d%dp%d", diskNum, partNum);
     std::wstring luksName = nameBuf;
-
-    // Check already open — if so, mount the existing mapper directly
-    if (bridge.runWSL(L"test -e /dev/mapper/" + luksName, distro).success()) {
-        std::wstring mapper = L"/dev/mapper/" + luksName;
-        auto innerFS = fsType;
-        if (innerFS.empty()) {
-            auto det = detectVolumeType(mapper, distro);
-            if (det == L"lvm") return mountLVM(mapper, mountPoint, distro, readOnly, diskNum, partNum, msg);
-            innerFS = det;
-        }
-        std::wstring cmd = L"mount";
-        if (!innerFS.empty() && innerFS != L"auto") cmd += L" -t " + innerFS;
-        if (readOnly) cmd += L" -o ro";
-        cmd += L" " + q(mapper) + L" " + q(mountPoint);
-        auto r = bridge.runWSLRoot(cmd, distro, 30000);
-        if (r.success()) {
-            { std::lock_guard<std::mutex> lk(m_mtx);
-            m_mounted.push_back({mapper, mountPoint, L"luks", diskNum, luksName, L"", L"", distro}); }
-            msg = L"LUKS volume (already open) mounted at " + mountPoint; return true;
-        }
-        msg = L"LUKS container opened but mount failed"; return false;
-    }
-
-    // Open LUKS (with small retry for device settling)
-    CommandResult r;
-    std::string pwd = password;
-    if (!pwd.empty() && pwd.back() != '\n') pwd += '\n';
-
-    for(int i=0; i<3; i++) {
-        if (!kf.empty()) {
-            r = bridge.runWSLRoot(L"cryptsetup luksOpen " + q(device) + L" " + q(luksName) + L" --key-file " + q(kf), distro);
-        } else {
-            r = bridge.runWSLRoot(L"cryptsetup luksOpen " + q(device) + L" " + q(luksName) + L" -d -", distro, 60000, pwd);
-        }
-        if (r.success()) break;
-        if (r.output.find(L"does not exist") == std::wstring::npos) break;
-        Sleep(1000); // Wait for device to appear
-    }
-
-    if (!r.success()) {
-        auto combined = r.output + L" " + r.error;
-        if (combined.find(L"password is required") != std::wstring::npos || 
-            combined.find(L"incorrect password") != std::wstring::npos ||
-            combined.find(L"Sorry, try again") != std::wstring::npos ||
-            (r.exitCode != 0 && combined.find(L"sudo:") != std::wstring::npos && combined.find(L"password") != std::wstring::npos && combined.find(L"cryptsetup") == std::wstring::npos)) {
-            msg = L"SUDO_PASSWORD_REQUIRED";
-            return false;
-        }
-        if (combined.find(L"No key") != std::wstring::npos || combined.find(L"passphrase") != std::wstring::npos)
-            msg = L"LUKS: Incorrect password or key";
-        else msg = L"cryptsetup error: " + (combined.empty() ? L"exit code " + std::to_wstring(r.exitCode) : combined);
-        return false;
-    }
-
     std::wstring mapper = L"/dev/mapper/" + luksName;
 
-    // Detect inner FS
+    // Open the container unless a previous run left it open already
+    if (!bridge.runWSL(L"test -e " + mapper, distro).success()) {
+        CommandResult r;
+        std::string pwd = password;
+        if (!pwd.empty() && pwd.back() != '\n') pwd += '\n';
+
+        // Small retry loop: the device may still be settling after attach
+        for (int i = 0; i < 3; i++) {
+            if (!kf.empty()) {
+                r = bridge.runWSLRoot(L"cryptsetup luksOpen " + q(device) + L" " + q(luksName) + L" --key-file " + q(kf), distro);
+            } else {
+                r = bridge.runWSLRoot(L"cryptsetup luksOpen " + q(device) + L" " + q(luksName) + L" -d -", distro, 60000, pwd);
+            }
+            if (r.success()) break;
+            if (r.output.find(L"does not exist") == std::wstring::npos) break;
+            Sleep(1000);
+        }
+
+        if (!r.success()) {
+            if (sudoRefused(r)) { msg = L"SUDO_PASSWORD_REQUIRED"; return false; }
+            auto combined = r.output + L" " + r.error;
+            if (combined.find(L"No key") != std::wstring::npos || combined.find(L"passphrase") != std::wstring::npos)
+                msg = L"LUKS: Incorrect password or key";
+            else msg = L"cryptsetup error: " + (combined.empty() ? L"exit code " + std::to_wstring(r.exitCode) : combined);
+            return false;
+        }
+    }
+
     std::wstring innerFS = fsType;
     if (innerFS.empty()) {
         auto det = detectVolumeType(mapper, distro);
-        if (det == L"lvm") {
-            // LUKS + LVM
-            return mountLVM(mapper, mountPoint, distro, readOnly, diskNum, partNum, msg);
-        }
+        if (det == L"lvm") return mountLVM(mapper, mountPoint, distro, readOnly, diskNum, partNum, msg);
         innerFS = det;
     }
 
-    // Mount
-    std::wstring cmd = L"mount";
-    if (!innerFS.empty() && innerFS != L"auto") cmd += L" -t " + innerFS;
-    if (readOnly) cmd += L" -o ro";
-    cmd += L" " + q(mapper) + L" " + q(mountPoint);
-    r = bridge.runWSLRoot(cmd, distro, 30000);
+    auto r = bridge.runWSLRoot(mountCmd(innerFS, readOnly, mapper, mountPoint), distro, 30000);
     if (r.success()) {
         { std::lock_guard<std::mutex> lk(m_mtx);
         m_mounted.push_back({mapper, mountPoint, L"luks", diskNum, luksName, L"", L"", distro}); }
@@ -439,11 +413,7 @@ bool Operations::mountLVM(const std::wstring& device, const std::wstring& mountP
         auto mp = lvs.size() > 1 ? mountPoint + L"/" + lv : mountPoint;
         createMountPoint(mp, distro);
         auto fs = detectVolumeType(lvDev, distro);
-        std::wstring cmd = L"mount";
-        if (!fs.empty() && fs != L"auto" && fs != L"lvm" && fs != L"luks") cmd += L" -t " + fs;
-        if (readOnly) cmd += L" -o ro";
-        cmd += L" " + q(lvDev) + L" " + q(mp);
-        if (bridge.runWSLRoot(cmd, distro, 30000).success()) {
+        if (bridge.runWSLRoot(mountCmd(fs, readOnly, lvDev, mp), distro, 30000).success()) {
             { std::lock_guard<std::mutex> lk(m_mtx);
             m_mounted.push_back({lvDev, mp, L"lvm", diskNum, L"", vg, lv, distro}); }
             ok++;

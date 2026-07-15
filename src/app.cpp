@@ -148,7 +148,15 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(m_comboDistro, CB_ADDSTRING, 0, (LPARAM)L"Not found");
         setStatus(L"WSL distributions loaded");
         return 0;
-    case WM_APP_ENV_CHECKED: return 0;
+    case WM_APP_ENV_CHECKED:
+        if (m_terminating) return 0;
+        setStatus(L"WSL2 is not installed or not available");
+        MessageBoxW(m_hwnd,
+            L"WSL2 was not found on this system.\n\n"
+            L"Install it with:  wsl --install\n"
+            L"then restart this application.",
+            L"WSL2 not found", MB_ICONERROR);
+        return 0;
     case WM_APP_MOUNT_DONE: {
         if (m_terminating) return 0;
         auto* data = (std::pair<bool, std::wstring>*)lp;
@@ -532,20 +540,11 @@ void AppWindow::onCommand(WORD id, WORD code, HWND ctl) {
             } else break;
         }
         
-        std::wstring escPath;
-        for (wchar_t c : std::wstring(path)) {
-            if (c == L'\'') escPath += L"'\\''";
-            else escPath += c;
-        }
-        auto r = m_ops.bridge.runWSLRoot(L"mkdir -p '" + escPath + L"'", distro);
-        if (r.success()) {
+        if (m_ops.createMountPoint(path, distro)) {
             MessageBoxW(m_hwnd, L"Directory created successfully!", L"Info", MB_ICONINFORMATION);
         } else {
-            std::wstring err = L"Failed to create directory:\n" + r.output + L" " + r.error;
-            MessageBoxW(m_hwnd, err.c_str(), L"Error", MB_ICONERROR);
-            if (err.find(L"Sorry, try again") != std::wstring::npos || err.find(L"password") != std::wstring::npos) {
-                m_ops.bridge.setWslPassword(L""); // clear so we prompt again next time
-            }
+            MessageBoxW(m_hwnd, L"Failed to create directory. Check the path and sudo password.",
+                        L"Error", MB_ICONERROR);
         }
         break;
     }

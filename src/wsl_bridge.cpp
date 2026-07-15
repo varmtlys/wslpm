@@ -452,20 +452,10 @@ CommandResult WSLBridge::runWSLRoot(const std::wstring& command,
         AuthorizeSudo(distro);
     }
 
-    // 2. Try sudo -n (non-interactive) first
-    std::wstring n_cmd = L"sudo -n " + command;
-    CommandResult r_n = runWSL(n_cmd, distro, L"", timeoutMs, stdinData);
-
-    if (r_n.success()) {
-        m_sudoAuthorized = true;
-        return r_n;
-    }
-
-    // 3. If failed but we have password, it might be that sudo -n failed (session expired?)
-    // In session, we can just use regular sudo if it's authorized.
-    // If we're here and authorized but it failed, maybe it's NOT a password issue.
-    
-    return r_n;
+    // 2. Run non-interactively; callers detect a sudo refusal from the output
+    CommandResult r = runWSL(L"sudo -n " + command, distro, L"", timeoutMs, stdinData);
+    if (r.success()) m_sudoAuthorized = true;
+    return r;
 }
 
 CommandResult WSLBridge::runWSLMount(const std::vector<std::wstring>& args, int timeoutMs) {

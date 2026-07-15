@@ -61,6 +61,8 @@ public:
     bool detachDisk(int diskNum, std::wstring& msg);
     bool safeEject(int diskNum, std::wstring& msg);
 
+    bool createMountPoint(const std::wstring& path, const std::wstring& distro);
+
     // Volume type detection
     std::wstring detectVolumeType(const std::wstring& device, const std::wstring& distro);
     std::wstring findWSLDevice(int diskNum, int partNum, uint64_t diskSize, uint64_t expectedSize, const std::wstring& distro);
@@ -103,7 +105,6 @@ private:
     std::vector<MountedVolume> m_mounted;
     mutable std::mutex m_mtx;
     bool ensureTools(const std::wstring& distro, const std::vector<std::wstring>& tools, std::wstring& msg);
-    bool createMountPoint(const std::wstring& path, const std::wstring& distro);
     std::wstring getUNCPath(const std::wstring& distro, const std::wstring& mountPoint);
     std::wstring shortcutDir();
 };
