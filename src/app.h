@@ -39,7 +39,9 @@ private:
     void doCompact();
     void unmountAll();
     void updateMountedList();
+    void updateSelButtons();
     void setStatus(const std::wstring& text);
+    void busy(bool on); // marquee progress bar while a background op runs
     void showLUKS(bool show);
     void appendLog(const std::wstring& cmd);
 

@@ -153,6 +153,7 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         if (m_terminating) return 0;
         auto* data = (std::pair<bool, std::wstring>*)lp;
         setStatus(data->second);
+        busy(false);
         EnableWindow(m_btnMount, TRUE);
         SetWindowTextW(m_btnMount, L"\U0001F517  Mount Volume");
         if (data->first) {
@@ -167,6 +168,7 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         if (m_terminating) return 0;
         auto* data = (std::pair<bool, std::wstring>*)lp;
         setStatus(data->second);
+        busy(false);
         updateMountedList();
         delete data;
         return 0;
@@ -187,8 +189,7 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         if (m_terminating) return 0;
         auto* data = (std::pair<bool, std::wstring>*)lp;
         setStatus(data->second);
-        ShowWindow(m_progress, SW_HIDE);
-        SendMessageW(m_progress, PBM_SETPOS, 0, 0);
+        busy(false);
         EnableWindow(m_btnCompact, TRUE);
         SetWindowTextW(m_btnCompact, L"\U0001F5DC Compact VHDX");
         MessageBoxW(m_hwnd, data->second.c_str(), L"Compact VHDX",
@@ -202,6 +203,12 @@ LRESULT AppWindow::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         appendLog(*p);
         delete p;
         return 0;
+    }
+    case WM_NOTIFY: {
+        auto* nm = (NMHDR*)lp;
+        if (nm->idFrom == IDC_MOUNTED_LV && nm->code == LVN_ITEMCHANGED)
+            updateSelButtons();
+        break;
     }
     case WM_CLOSE: onDestroy(); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -363,6 +370,7 @@ void AppWindow::onCreate() {
     m_btnUnmount = MakeButton(m_hwnd, hi, L"\u23CF Unmount", rx, ry, 130, Theme::BTN_H, m_font, IDC_BTN_UNMOUNT_SEL, true);
     m_btnEject   = MakeButton(m_hwnd, hi, L"\U0001F5D1 Eject",   rx+136, ry, 100, Theme::BTN_H, m_font, IDC_BTN_EJECT_SEL, true);
     m_btnOpen    = MakeButton(m_hwnd, hi, L"\U0001F4C2 Open",   rx+242, ry, 100, Theme::BTN_H, m_font, IDC_BTN_OPEN_SEL, true);
+    updateSelButtons();
     ry += 40;
 
     // ── Log Section ──
@@ -630,6 +638,21 @@ void AppWindow::refreshDisks() {
     }).detach();
 }
 
+void AppWindow::busy(bool on) {
+    if (on) {
+        m_progressMarquee = true;
+        SetWindowLongPtrW(m_progress, GWL_STYLE,
+            GetWindowLongPtrW(m_progress, GWL_STYLE) | PBS_MARQUEE);
+        SendMessageW(m_progress, PBM_SETMARQUEE, TRUE, 0);
+        ShowWindow(m_progress, SW_SHOW);
+    } else {
+        m_progressMarquee = false;
+        SendMessageW(m_progress, PBM_SETMARQUEE, FALSE, 0);
+        ShowWindow(m_progress, SW_HIDE);
+        SendMessageW(m_progress, PBM_SETPOS, 0, 0);
+    }
+}
+
 void AppWindow::setStatus(const std::wstring& text) {
     SendMessageW(m_statusBar, SB_SETTEXTW, 0, (LPARAM)text.c_str());
     appendLog(L"STATUS: " + text + L"\r\n");
@@ -719,6 +742,7 @@ void AppWindow::doMount() {
     EnableWindow(m_btnMount, FALSE);
     SetWindowTextW(m_btnMount, L"\u23F3  Mounting...");
     setStatus(L"Mounting...");
+    busy(true);
 
     int diskNum = disk.number;
     m_pendingThreads++;
@@ -825,6 +849,7 @@ void AppWindow::doUnmount(int idx) {
     }
     if (MessageBoxW(m_hwnd, L"Unmount selected volume?", L"Confirm",
                      MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    busy(true);
     m_pendingThreads++;
     std::thread([=]() {
         std::wstring msg;
@@ -843,6 +868,7 @@ void AppWindow::doEject(int idx) {
     }
     if (MessageBoxW(m_hwnd, L"Unmount and safely eject disk?", L"Eject",
                      MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    busy(true);
     m_pendingThreads++;
     std::thread([=]() {
         std::wstring msg;
@@ -948,12 +974,7 @@ void AppWindow::doCompact() {
     SetWindowTextW(m_btnCompact, L"⏳ Compacting...");
     setStatus(L"Compacting '" + img.name + L"' (" + img.sizeDisplay() + L")...");
 
-    // Progress: marquee until diskpart starts reporting percentages
-    m_progressMarquee = true;
-    SetWindowLongPtrW(m_progress, GWL_STYLE,
-        GetWindowLongPtrW(m_progress, GWL_STYLE) | PBS_MARQUEE);
-    SendMessageW(m_progress, PBM_SETMARQUEE, TRUE, 0);
-    ShowWindow(m_progress, SW_SHOW);
+    busy(true); // marquee until diskpart starts reporting percentages
 
     HWND hwnd = m_hwnd;
     m_ops.bridge.setProgressCallback([hwnd](int p) {
@@ -978,6 +999,7 @@ void AppWindow::unmountAll() {
     }
     if (MessageBoxW(m_hwnd, L"Unmount all volumes?", L"Confirm",
                      MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    busy(true);
     m_pendingThreads++;
     std::thread([this]() {
         std::wstring msg;
@@ -986,6 +1008,13 @@ void AppWindow::unmountAll() {
         if (!m_terminating) PostMessageW(m_hwnd, WM_APP_UNMOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(true, msg));
         m_pendingThreads--;
     }).detach();
+}
+
+void AppWindow::updateSelButtons() {
+    BOOL has = ListView_GetNextItem(m_lvMounted, -1, LVNI_SELECTED) >= 0;
+    EnableWindow(m_btnUnmount, has);
+    EnableWindow(m_btnEject, has);
+    EnableWindow(m_btnOpen, has);
 }
 
 void AppWindow::updateMountedList() {
