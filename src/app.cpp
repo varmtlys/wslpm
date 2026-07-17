@@ -897,26 +897,33 @@ void AppWindow::doUnmount(int idx) {
 
 void AppWindow::doEject(int idx) {
     int diskNum = -1;
+    std::wstring selMp;
     {
         std::lock_guard<std::mutex> lk(m_ops.mtx());
         if (idx < 0 || idx >= (int)m_ops.mounted().size()) return;
         diskNum = m_ops.mounted()[idx].diskNumber;
+        selMp = m_ops.mounted()[idx].mountPoint;
     }
-    if (MessageBoxW(m_hwnd, L"Unmount and safely eject disk?", L"Eject",
-                     MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    // Restored mounts have an unknown physical disk (-1): unmount only, no eject
+    bool canEject = (diskNum >= 0);
+    if (MessageBoxW(m_hwnd, canEject ? L"Unmount and safely eject disk?"
+                                     : L"Physical disk unknown for this restored mount.\nUnmount it (no eject)?",
+                     L"Eject", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     busy(true);
     m_pendingThreads++;
     std::thread([=]() {
         std::wstring msg;
         std::vector<std::wstring> toUnmount;
-        {
+        if (!canEject) {
+            toUnmount.push_back(selMp);
+        } else {
             std::lock_guard<std::mutex> lk(m_ops.mtx());
             for (auto& v : m_ops.mounted()) {
                 if (v.diskNumber == diskNum) toUnmount.push_back(v.mountPoint);
             }
         }
         for (auto& mp : toUnmount) m_ops.unmountByMountPoint(mp, msg);
-        m_ops.safeEject(diskNum, msg);
+        if (canEject) m_ops.safeEject(diskNum, msg);
         if (!m_terminating) PostMessageW(m_hwnd, WM_APP_UNMOUNT_DONE, 0, (LPARAM)new std::pair<bool, std::wstring>(true, msg));
         m_pendingThreads--;
     }).detach();

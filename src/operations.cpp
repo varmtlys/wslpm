@@ -264,13 +264,11 @@ std::wstring Operations::findWSLDevice(int diskNum, int partNum, uint64_t diskSi
     std::sort(disks.begin(), disks.end(), sortFn);
     std::sort(parts.begin(), parts.end(), sortFn);
 
-    // If we specifically want a partition and it was matched by exact partition size
-    if (partNum > 0 && !parts.empty()) return L"/dev/" + parts[0].name;
-    
-    // If partition not found explicitly (or we want the whole disk), fallback to the disk size match.
-    if (!disks.empty()) return L"/dev/" + disks[0].name + (partNum > 0 ? std::to_wstring(partNum) : L"");
+    // Partition requested: only trust an exact partition-size match
+    if (partNum > 0) return parts.empty() ? L"" : L"/dev/" + parts[0].name;
 
-    return L"";  // nothing matched by size — do not guess a device
+    // Whole disk requested
+    return disks.empty() ? L"" : L"/dev/" + disks[0].name;
 }
 
 // ── Mount Plain ──────────────────────────────────────────
@@ -457,10 +455,31 @@ int Operations::rescanMounts(const std::wstring& distro) {
         if (dev.rfind(L"/dev/mapper/luks_", 0) == 0) {
             v.luksName = dev.substr(12); // after "/dev/mapper/"
             v.volumeType = L"luks";
+        } else if (dev.rfind(L"/dev/mapper/", 0) == 0) {
+            // /dev/mapper/<vg>-<lv>, where a literal '-' in a name is doubled to '--'
+            std::wstring name = dev.substr(12);
+            size_t sep = std::wstring::npos;
+            for (size_t i = 0; i < name.size(); i++) {
+                if (name[i] != L'-') continue;
+                if (i + 1 < name.size() && name[i + 1] == L'-') { i++; continue; }
+                sep = i; break;
+            }
+            if (sep != std::wstring::npos) {
+                auto unesc = [](std::wstring s) {
+                    std::wstring o;
+                    for (size_t k = 0; k < s.size(); k++) {
+                        if (s[k] == L'-' && k + 1 < s.size() && s[k + 1] == L'-') { o += L'-'; k++; }
+                        else o += s[k];
+                    }
+                    return o;
+                };
+                v.lvmVG = unesc(name.substr(0, sep));
+                v.lvmLV = unesc(name.substr(sep + 1));
+                v.volumeType = L"lvm";
+            }
         } else {
             auto s1 = dev.find(L'/', 5);
-            if (s1 != std::wstring::npos && dev.find(L'/', s1 + 1) == std::wstring::npos
-                && dev.rfind(L"/dev/mapper/", 0) != 0) {
+            if (s1 != std::wstring::npos && dev.find(L'/', s1 + 1) == std::wstring::npos) {
                 // /dev/<vg>/<lv>
                 v.lvmVG = dev.substr(5, s1 - 5);
                 v.lvmLV = dev.substr(s1 + 1);
