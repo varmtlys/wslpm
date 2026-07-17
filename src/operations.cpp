@@ -222,7 +222,7 @@ bool Operations::safeEject(int diskNum, std::wstring& msg) {
 std::wstring Operations::detectVolumeType(const std::wstring& device, const std::wstring& distro) {
     auto r = bridge.runWSLRoot(L"blkid -o value -s TYPE " + q(device) + L" 2>/dev/null", distro);
     if (r.success()) {
-        auto t = r.output; while (!t.empty()&&(t.back()==L'\r'||t.back()==L'\n')) t.pop_back();
+        auto t = r.output; trimWS(t);
         if (t == L"crypto_LUKS") return L"luks";
         if (t == L"LVM2_member") return L"lvm";
         return t;  // ext4, xfs, btrfs, etc.
@@ -399,8 +399,7 @@ bool Operations::mountLVM(const std::wstring& device, const std::wstring& mountP
     std::wistringstream ss(r.output);
     std::wstring lv;
     while (std::getline(ss, lv)) {
-        while (!lv.empty() && (lv.back()==L'\r'||lv.back()==L' ')) lv.pop_back();
-        while (!lv.empty() && lv.front()==L' ') lv.erase(lv.begin());
+        trimWS(lv);
         if (!lv.empty()) lvs.push_back(lv);
     }
     if (lvs.empty()) { msg = L"Logical volumes not found"; return false; }

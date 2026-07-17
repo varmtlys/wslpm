@@ -49,7 +49,7 @@ public:
                          const std::string& stdinData = "");
     CommandResult runWSLMount(const std::vector<std::wstring>& args, int timeoutMs = 30000);
 
-    bool checkWSLInstalled(std::wstring& msg);
+    bool checkWSLInstalled();
     std::vector<std::pair<std::wstring, bool>> getDistros();
 
     static std::string  WideToUTF8(const std::wstring& w);
@@ -76,7 +76,6 @@ private:
         HANDLE hIn = nullptr;
         HANDLE hOut = nullptr;
         std::wstring distro;
-        bool authorized = false;
     };
     Session* m_session = nullptr;
 

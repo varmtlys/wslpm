@@ -320,7 +320,6 @@ bool WSLBridge::AuthorizeSudo(const std::wstring& distro) {
         return false;
     }
 
-    m_session->authorized = (exitCode == 0);
     m_sudoAuthorized = (exitCode == 0);
     
     if (m_sudoAuthorized) {
@@ -375,7 +374,7 @@ bool WSLBridge::EnsureSession(const std::wstring& distro) {
     CloseHandle(hInR); CloseHandle(hOutW);
     CloseHandle(pi.hThread);
 
-    m_session = new Session{pi.hProcess, hInW, hOutR, distro, false};
+    m_session = new Session{pi.hProcess, hInW, hOutR, distro};
     
     // Small wait for bash to start
     Sleep(200);
@@ -473,14 +472,8 @@ CommandResult WSLBridge::runWSLMount(const std::vector<std::wstring>& args, int 
 
 // ── Checks ───────────────────────────────────────────────
 
-bool WSLBridge::checkWSLInstalled(std::wstring& msg) {
-    auto r = RunProcess(SysExe(L"wsl.exe") + L" -l -v", 10000, "", OutEnc::UTF16LE);
-    if (!r.success()) {
-        msg = L"WSL2 is not installed or not configured";
-        return false;
-    }
-    msg = r.output;
-    return true;
+bool WSLBridge::checkWSLInstalled() {
+    return RunProcess(SysExe(L"wsl.exe") + L" -l -v", 10000, "", OutEnc::UTF16LE).success();
 }
 
 std::vector<std::pair<std::wstring, bool>> WSLBridge::getDistros() {

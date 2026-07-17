@@ -636,9 +636,7 @@ void AppWindow::onDiskSelected(int idx) {
 }
 
 void AppWindow::initEnv() {
-    std::wstring wslMsg;
-    bool wslOk = m_ops.bridge.checkWSLInstalled(wslMsg);
-    if (!wslOk) {
+    if (!m_ops.bridge.checkWSLInstalled()) {
         PostMessageW(m_hwnd, WM_APP_ENV_CHECKED, 0, 0);
         return;
     }
