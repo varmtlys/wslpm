@@ -55,6 +55,9 @@ public:
     static std::string  WideToUTF8(const std::wstring& w);
     static std::wstring UTF8ToWide(const std::string& u);
 
+    // Absolute quoted path to a System32 binary — avoids PATH/CWD hijacking
+    static std::wstring SysExe(const std::wstring& relPath);
+
     void setWslPassword(const std::wstring& p) { m_wslUserPassword = p; m_sudoAuthorized = false; }
     const std::wstring& wslPassword() const { return m_wslUserPassword; }
 

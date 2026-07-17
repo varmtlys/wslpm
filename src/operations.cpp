@@ -586,14 +586,18 @@ bool Operations::compactDistro(const std::wstring& distro, const std::wstring& v
     // 3. Shut down WSL entirely to release the VHDX file lock
     bridge.note(L"=== Compact 2/3: shutting down WSL...");
     bridge.CloseSession();
-    auto rs = bridge.RunProcess(L"wsl.exe --shutdown", 60000, "", OutEnc::UTF16LE);
+    auto rs = bridge.RunProcess(WSLBridge::SysExe(L"wsl.exe") + L" --shutdown", 60000, "", OutEnc::UTF16LE);
     if (rs.exitCode != 0) { msg = L"wsl --shutdown failed"; return false; }
     Sleep(3000); // give the utility VM time to release the file
 
-    // 4. Compact via diskpart (works without Hyper-V's Optimize-VHD)
-    wchar_t tmpDir[MAX_PATH];
+    // 4. Compact via diskpart (works without Hyper-V's Optimize-VHD).
+    //    Unique temp name so a local user can't pre-place/redirect the script.
+    wchar_t tmpDir[MAX_PATH], scriptBuf[MAX_PATH];
     GetTempPathW(MAX_PATH, tmpDir);
-    std::wstring scriptPath = std::wstring(tmpDir) + L"wslpm_compact.txt";
+    if (!GetTempFileNameW(tmpDir, L"wpm", 0, scriptBuf)) {
+        msg = L"Failed to create temp script file"; return false;
+    }
+    std::wstring scriptPath = scriptBuf;
     std::wstring scriptW =
         L"select vdisk file=\"" + vhdx + L"\"\r\n"
         L"attach vdisk readonly\r\n"
@@ -612,8 +616,8 @@ bool Operations::compactDistro(const std::wstring& distro, const std::wstring& v
 
     bridge.note(L"=== Compact 3/3: diskpart compact vdisk (progress below)...");
     // diskpart prints in the console OEM codepage; stream progress lines to the log
-    auto rd = bridge.RunProcess(L"diskpart /s \"" + scriptPath + L"\"", 1800000, "",
-                                OutEnc::OEM, true);
+    auto rd = bridge.RunProcess(WSLBridge::SysExe(L"diskpart.exe") + L" /s \"" + scriptPath + L"\"",
+                                1800000, "", OutEnc::OEM, true);
     DeleteFileW(scriptPath.c_str());
     if (rd.exitCode != 0) {
         msg = L"diskpart compact failed (exit code " + std::to_wstring(rd.exitCode) + L"): " + rd.output;

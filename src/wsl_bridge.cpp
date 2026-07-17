@@ -23,6 +23,12 @@ std::wstring WSLBridge::UTF8ToWide(const std::string& u) {
     return w;
 }
 
+std::wstring WSLBridge::SysExe(const std::wstring& relPath) {
+    wchar_t dir[MAX_PATH];
+    UINT n = GetSystemDirectoryW(dir, MAX_PATH);
+    return L"\"" + std::wstring(dir, n) + L"\\" + relPath + L"\"";
+}
+
 // Decode raw bytes as UTF-16LE (used for wsl.exe native commands)
 static std::wstring DecodeUTF16LE(const std::string& bytes) {
     if (bytes.size() < 2) return L"";
@@ -214,7 +220,8 @@ CommandResult WSLBridge::runPowerShell(const std::wstring& script, int timeoutMs
         L"$ProgressPreference = 'SilentlyContinue'; "
         L"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script;
     std::wstring b64 = Base64Encode(fullScript.c_str(), fullScript.size() * sizeof(wchar_t));
-    std::wstring cmd = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " + b64;
+    std::wstring cmd = SysExe(L"WindowsPowerShell\\v1.0\\powershell.exe") +
+                       L" -NoProfile -NonInteractive -EncodedCommand " + b64;
     return RunProcess(cmd, timeoutMs, "", OutEnc::UTF8);
 }
 
@@ -240,8 +247,8 @@ CommandResult WSLBridge::runWSL(const std::wstring& command,
         }
     }
 
-    std::wstring cmd = L"wsl.exe";
-    if (!distro.empty()) cmd += L" -d " + distro;
+    std::wstring cmd = SysExe(L"wsl.exe");
+    if (!distro.empty()) cmd += L" -d \"" + distro + L"\"";
     if (!user.empty()) cmd += L" -u " + user;
     cmd += L" -- bash -c '" + bashEsc(command) + L"'";
     return RunProcess(cmd, timeoutMs, stdinData, OutEnc::UTF8);
@@ -357,8 +364,8 @@ bool WSLBridge::EnsureSession(const std::wstring& distro) {
     si.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi{};
-    std::wstring cmd = L"wsl.exe";
-    if (!distro.empty()) cmd += L" -d " + distro;
+    std::wstring cmd = SysExe(L"wsl.exe");
+    if (!distro.empty()) cmd += L" -d \"" + distro + L"\"";
     cmd += L" -- bash";
 
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
@@ -459,7 +466,7 @@ CommandResult WSLBridge::runWSLRoot(const std::wstring& command,
 }
 
 CommandResult WSLBridge::runWSLMount(const std::vector<std::wstring>& args, int timeoutMs) {
-    std::wstring cmd = L"wsl.exe";
+    std::wstring cmd = SysExe(L"wsl.exe");
     for (auto& a : args) cmd += L" " + a;
     return RunProcess(cmd, timeoutMs, "", OutEnc::UTF16LE); // wsl.exe native output
 }
@@ -467,7 +474,7 @@ CommandResult WSLBridge::runWSLMount(const std::vector<std::wstring>& args, int 
 // ── Checks ───────────────────────────────────────────────
 
 bool WSLBridge::checkWSLInstalled(std::wstring& msg) {
-    auto r = RunProcess(L"wsl.exe -l -v", 10000, "", OutEnc::UTF16LE);
+    auto r = RunProcess(SysExe(L"wsl.exe") + L" -l -v", 10000, "", OutEnc::UTF16LE);
     if (!r.success()) {
         msg = L"WSL2 is not installed or not configured";
         return false;
@@ -478,7 +485,7 @@ bool WSLBridge::checkWSLInstalled(std::wstring& msg) {
 
 std::vector<std::pair<std::wstring, bool>> WSLBridge::getDistros() {
     std::vector<std::pair<std::wstring, bool>> distros;
-    auto r = RunProcess(L"wsl.exe -l -v", 10000, "", OutEnc::UTF16LE);
+    auto r = RunProcess(SysExe(L"wsl.exe") + L" -l -v", 10000, "", OutEnc::UTF16LE);
     if (r.output.empty()) return distros;
 
     std::wstring line;
