@@ -5,3 +5,4 @@ build/
 *.obj
 *.res
 *.exe
+build-ci/
