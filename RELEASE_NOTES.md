@@ -21,4 +21,4 @@ First stable release of **wslpm** — a native Win32 utility for mounting Linux 
 
 ## Install
 
-Download `wslpm.exe` below and run it.
+Download `wslpm-v1.0.0.exe` below and run it.

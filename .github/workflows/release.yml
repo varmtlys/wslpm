@@ -21,10 +21,14 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Rename artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        run: Copy-Item build/Release/wslpm.exe wslpm-${{ github.ref_name }}.exe
+
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/Release/wslpm.exe
+          files: wslpm-v*.exe
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
